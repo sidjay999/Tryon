@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Virtual Try-On | See Yourself in Any Style</title>
+  <meta name="description" content="Upload your photo and a clothing item — our AI generates a photorealistic try-on in seconds. Powered by Stable Diffusion XL." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <!-- ── BACKGROUND PARTICLES ── -->
+  <div class="bg-particles" id="bg-particles"></div>
+
+  <!-- ── HEADER ── -->
+  <header class="header">
+    <div class="header-inner container">
+      <a href="/" class="logo">
+        <span class="logo-icon">✦</span>
+        <span class="logo-text">TryOn<span class="logo-accent">AI</span></span>
+      </a>
+      <nav class="nav">
+        <a href="#how-it-works" class="nav-link">How It Works</a>
+        <a href="#try-now" class="nav-link">Try Now</a>
+        <a href="/docs" class="nav-link" target="_blank">API Docs</a>
+      </nav>
+      <div class="header-badge">
+        <span class="badge-dot"></span>
+        SDXL Powered
+      </div>
+    </div>
+  </header>
+
+  <!-- ── HERO ── -->
+  <section class="hero">
+    <div class="container hero-inner">
+      <div class="hero-tag">⚡ AI-Powered • 1024px HD Output • &lt;15s Inference</div>
+      <h1 class="hero-title">
+        See Yourself in<br />
+        <span class="gradient-text">Any Outfit</span> Instantly
+      </h1>
+      <p class="hero-subtitle">
+        Upload your photo and a clothing item. Our AI warps, blends, and
+        generates a photorealistic try-on using Stable Diffusion XL + ControlNet.
+      </p>
+      <div class="hero-actions">
+        <a href="#try-now" class="btn btn-primary">Try It Now →</a>
+        <a href="/docs" class="btn btn-ghost" target="_blank">View API Docs</a>
+      </div>
+      <div class="hero-stats">
+        <div class="stat"><span class="stat-num">1024px</span><span class="stat-label">HD Output</span></div>
+        <div class="stat-divider"></div>
+        <div class="stat"><span class="stat-num">&lt;15s</span><span class="stat-label">Inference Time</span></div>
+        <div class="stat-divider"></div>
+        <div class="stat"><span class="stat-num">SDXL</span><span class="stat-label">Base Model</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── HOW IT WORKS ── -->
+  <section class="how-it-works section" id="how-it-works">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-tag">Pipeline</span>
+        <h2 class="section-title">How It Works</h2>
+      </div>
+      <div class="steps-grid">
+        <div class="step-card">
+          <div class="step-num">01</div>
+          <div class="step-icon">📸</div>
+          <h3>Upload Images</h3>
+          <p>Upload your full-body photo and the clothing item you want to try on.</p>
+        </div>
+        <div class="step-connector"></div>
+        <div class="step-card">
+          <div class="step-num">02</div>
+          <div class="step-icon">🧍</div>
+          <h3>Segmentation</h3>
+          <p>AI parses your body, extracts pose keypoints, and identifies the clothing region.</p>
+        </div>
+        <div class="step-connector"></div>
+        <div class="step-card">
+          <div class="step-num">03</div>
+          <div class="step-icon">✨</div>
+          <h3>SDXL Generate</h3>
+          <p>Stable Diffusion XL + ControlNet generates a photorealistic try-on result.</p>
+        </div>
+        <div class="step-connector"></div>
+        <div class="step-card">
+          <div class="step-num">04</div>
+          <div class="step-icon">🖼️</div>
+          <h3>HD Output</h3>
+          <p>Face identity is preserved, lighting is matched, and you get a 1024px result.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── TRY NOW ── -->
+  <section class="try-section section" id="try-now">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-tag">Try It Live</span>
+        <h2 class="section-title">Virtual Try-On Studio</h2>
+        <p class="section-subtitle">Drop your images below and let the AI do the magic.</p>
+      </div>
+
+      <div class="studio-card glass-card">
+        <!-- Upload Row -->
+        <div class="upload-row" id="upload-row">
+          <!-- Person Upload -->
+          <div class="upload-zone" id="zone-person" data-type="person">
+            <div class="upload-zone-inner">
+              <div class="upload-icon">🧍</div>
+              <div class="upload-title">Your Photo</div>
+              <div class="upload-hint">Drag & drop or click<br /><small>JPG, PNG, WEBP · Max 20MB</small></div>
+            </div>
+            <input type="file" id="input-person" accept="image/jpeg,image/png,image/webp" class="upload-input" />
+            <div class="upload-preview hidden" id="preview-person">
+              <img id="preview-person-img" alt="Person preview" />
+              <button class="preview-remove" id="remove-person" title="Remove">✕</button>
+            </div>
+          </div>
+
+          <div class="upload-plus">+</div>
+
+          <!-- Clothing Upload -->
+          <div class="upload-zone" id="zone-clothing" data-type="clothing">
+            <div class="upload-zone-inner">
+              <div class="upload-icon">👕</div>
+              <div class="upload-title">Clothing Item</div>
+              <div class="upload-hint">Drag & drop or click<br /><small>JPG, PNG, WEBP · Max 20MB</small></div>
+            </div>
+            <input type="file" id="input-clothing" accept="image/jpeg,image/png,image/webp" class="upload-input" />
+            <div class="upload-preview hidden" id="preview-clothing">
+              <img id="preview-clothing-img" alt="Clothing preview" />
+              <button class="preview-remove" id="remove-clothing" title="Remove">✕</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Submit Button -->
+        <div class="submit-row">
+          <button class="btn btn-primary btn-large" id="btn-generate" disabled>
+            <span class="btn-text">✦ Generate Try-On</span>
+            <span class="btn-spinner hidden"></span>
+          </button>
+          <p class="submit-note" id="submit-note">Upload both images to generate</p>
+        </div>
+
+        <!-- Progress -->
+        <div class="progress-section hidden" id="progress-section">
+          <div class="progress-steps" id="progress-steps">
+            <div class="progress-step" data-step="segmentation">
+              <div class="ps-icon">🧩</div>
+              <div class="ps-label">Segmentation</div>
+            </div>
+            <div class="progress-step" data-step="pose">
+              <div class="ps-icon">🧍</div>
+              <div class="ps-label">Pose</div>
+            </div>
+            <div class="progress-step" data-step="warp">
+              <div class="ps-icon">📐</div>
+              <div class="ps-label">Warp</div>
+            </div>
+            <div class="progress-step" data-step="inpainting">
+              <div class="ps-icon">🎨</div>
+              <div class="ps-label">Generate</div>
+            </div>
+            <div class="progress-step" data-step="blend">
+              <div class="ps-icon">✨</div>
+              <div class="ps-label">Blend</div>
+            </div>
+          </div>
+          <div class="progress-bar-wrap">
+            <div class="progress-bar" id="progress-bar"></div>
+          </div>
+          <div class="progress-label" id="progress-label">Initializing pipeline…</div>
+        </div>
+
+        <!-- Result -->
+        <div class="result-section hidden" id="result-section">
+          <div class="result-header">
+            <span class="result-badge">✅ Try-On Complete</span>
+            <button class="btn btn-ghost btn-small" id="btn-download">⬇ Download HD</button>
+          </div>
+          <div class="slider-container" id="slider-container">
+            <div class="slider-before" id="slider-before">
+              <img id="result-before" alt="Original" />
+              <span class="slider-tag">Before</span>
+            </div>
+            <div class="slider-after" id="slider-after">
+              <img id="result-after" alt="Try-On Result" />
+              <span class="slider-tag">After</span>
+            </div>
+            <div class="slider-handle" id="slider-handle">
+              <div class="slider-handle-line"></div>
+              <div class="slider-handle-circle">⇔</div>
+              <div class="slider-handle-line"></div>
+            </div>
+          </div>
+          <button class="btn btn-ghost btn-small mt-2" id="btn-reset">Try Another</button>
+        </div>
+
+        <!-- Error -->
+        <div class="error-section hidden" id="error-section">
+          <div class="error-icon">⚠️</div>
+          <div class="error-msg" id="error-msg">Something went wrong. Please try again.</div>
+          <button class="btn btn-ghost btn-small" id="btn-retry">Retry</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── FOOTER ── -->
+  <footer class="footer">
+    <div class="container footer-inner">
+      <div class="footer-logo">
+        <span class="logo-icon">✦</span> TryOnAI
+      </div>
+      <p class="footer-copy">Powered by Stable Diffusion XL · ControlNet · FastAPI</p>
+      <a href="/docs" class="footer-link" target="_blank">API Docs</a>
+    </div>
+  </footer>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

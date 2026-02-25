@@ -1,0 +1,82 @@
+version: "3.9"
+
+services:
+
+  # ── Redis ──────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI (GPU) ──────────────────────────────────────────────
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DEVICE=cuda
+      - USE_FP16=true
+      - USE_XFORMERS=true
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - model_cache:/app/model_cache
+      - /tmp/tryon:/tmp/tryon
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ── Celery Worker (GPU) ────────────────────────────────────────
+  worker:
+    build: .
+    restart: unless-stopped
+    command: celery -A app.queue.worker.celery_app worker --loglevel=info --concurrency=1
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DEVICE=cuda
+      - USE_FP16=true
+      - USE_XFORMERS=true
+    env_file: .env
+    volumes:
+      - model_cache:/app/model_cache
+      - /tmp/tryon:/tmp/tryon
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ── Nginx Reverse Proxy ────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./frontend:/usr/share/nginx/html:ro
+
+volumes:
+  model_cache:
+    driver: local
