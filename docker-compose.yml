@@ -1,31 +1,24 @@
 version: "3.9"
 
+# Phase 2 – Simplified Stack (Prototype Mode)
+# 2 services: api (GPU) + nginx (reverse proxy + static files)
+# Redis and Celery worker removed — pipeline is now synchronous
+
 services:
 
-  # ── Redis ──────────────────────────────────────────────────────
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ── FastAPI (GPU) ──────────────────────────────────────────────
+  # ── FastAPI + GPU inference ────────────────────────────────
   api:
     build: .
     restart: unless-stopped
-    depends_on:
-      redis:
-        condition: service_healthy
     environment:
-      - REDIS_URL=redis://redis:6379/0
       - DEVICE=cuda
       - USE_FP16=true
       - USE_XFORMERS=true
+      - USE_REFINER=true
+      - REFINER_STRENGTH=0.2
+      - FACE_MASK_PADDING=30
+      - IP_ADAPTER_SCALE=0.7
+      - FACE_IDENTITY_ENABLED=true
     env_file: .env
     ports:
       - "8000:8000"
@@ -38,34 +31,9 @@ services:
           devices:
             - driver: nvidia
               count: 1
-              capabilities: [gpu]
+              capabilities: [ gpu ]
 
-  # ── Celery Worker (GPU) ────────────────────────────────────────
-  worker:
-    build: .
-    restart: unless-stopped
-    command: celery -A app.queue.worker.celery_app worker --loglevel=info --concurrency=1
-    depends_on:
-      redis:
-        condition: service_healthy
-    environment:
-      - REDIS_URL=redis://redis:6379/0
-      - DEVICE=cuda
-      - USE_FP16=true
-      - USE_XFORMERS=true
-    env_file: .env
-    volumes:
-      - model_cache:/app/model_cache
-      - /tmp/tryon:/tmp/tryon
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
-  # ── Nginx Reverse Proxy ────────────────────────────────────────
+  # ── Nginx – static frontend + API proxy ────────────────────
   nginx:
     image: nginx:alpine
     restart: unless-stopped
@@ -80,3 +48,9 @@ services:
 volumes:
   model_cache:
     driver: local
+
+# To re-enable Celery + Redis for production scaling:
+#   1. Add redis service (image: redis:7-alpine)
+#   2. Add worker service (command: celery -A app.queue.worker.celery_app worker)
+#   3. Set REDIS_URL in .env
+#   4. Switch routers/tryon.py back to async enqueue pattern

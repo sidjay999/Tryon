@@ -1,9 +1,6 @@
 """
-Human parsing and segmentation pipeline.
-Uses Segformer B2 Clothes to extract:
-  - Full body mask
-  - Upper-body clothing mask
-  - Lower-body clothing mask
+Human parsing and segmentation pipeline – Phase 2.
+Now also extracts face bounding box for hard mask exclusion.
 """
 import logging
 from typing import NamedTuple
@@ -16,44 +13,20 @@ from app.models.loader import get_model
 
 logger = logging.getLogger(__name__)
 
-# Segformer B2 Clothes label map
-LABEL_MAP = {
-    0: "Background",
-    1: "Hat",
-    2: "Hair",
-    3: "Sunglasses",
-    4: "Upper-clothes",
-    5: "Skirt",
-    6: "Pants",
-    7: "Dress",
-    8: "Belt",
-    9: "Left-shoe",
-    10: "Right-shoe",
-    11: "Face",
-    12: "Left-leg",
-    13: "Right-leg",
-    14: "Left-arm",
-    15: "Right-arm",
-    16: "Bag",
-    17: "Scarf",
-}
-
-CLOTHING_LABELS = {4, 5, 6, 7, 8, 16, 17}   # everything clothing / accessories
-BODY_LABELS = {11, 12, 13, 14, 15}            # face + limbs (preserve identity)
+CLOTHING_LABELS = {4, 5, 6, 7, 8, 16, 17}
+BODY_LABELS = {11, 12, 13, 14, 15}
+FACE_LABEL = 11
 
 
 class SegmentationResult(NamedTuple):
-    clothing_mask: Image.Image    # white = clothing region to replace
-    body_mask: Image.Image        # white = full human silhouette
-    face_mask: Image.Image        # white = face region (preserved)
-    label_map: np.ndarray         # raw per-pixel label array
+    clothing_mask: Image.Image
+    body_mask: Image.Image
+    face_mask: Image.Image
+    face_bbox: tuple[int, int, int, int] | None  # (x1, y1, x2, y2) or None
+    label_map: np.ndarray
 
 
 def segment_person(person_image: Image.Image) -> SegmentationResult:
-    """
-    Run Segformer on person_image.
-    Returns binary masks (PIL, mode='L', 0/255) for clothing, body, and face.
-    """
     processor = get_model("seg_processor")
     model = get_model("seg_model")
     device = get_model("device")
@@ -66,10 +39,10 @@ def segment_person(person_image: Image.Image) -> SegmentationResult:
     with torch.no_grad():
         outputs = model(**inputs)
 
-    logits = outputs.logits                       # (1, num_labels, H', W')
+    logits = outputs.logits
     upsampled = torch.nn.functional.interpolate(
         logits,
-        size=(original_size[1], original_size[0]),  # (H, W)
+        size=(original_size[1], original_size[0]),
         mode="bilinear",
         align_corners=False,
     )
@@ -81,23 +54,83 @@ def segment_person(person_image: Image.Image) -> SegmentationResult:
 
     clothing_mask = _make_mask(CLOTHING_LABELS)
     body_mask = _make_mask(CLOTHING_LABELS | BODY_LABELS)
-    face_mask = _make_mask({11})  # face only
+    face_mask = _make_mask({FACE_LABEL})
 
-    logger.debug("Segmentation complete — unique labels: %s", np.unique(labels).tolist())
+    # Extract face bounding box for hard mask exclusion
+    face_bbox = _extract_face_bbox(labels, FACE_LABEL)
+    logger.debug("Segmentation complete — face_bbox: %s", face_bbox)
 
     return SegmentationResult(
         clothing_mask=clothing_mask,
         body_mask=body_mask,
         face_mask=face_mask,
+        face_bbox=face_bbox,
         label_map=labels,
     )
 
 
-def dilate_mask(mask: Image.Image, kernel_size: int = 15) -> Image.Image:
-    """Slightly expand the mask edges for smoother inpainting transitions."""
-    import cv2
+def _extract_face_bbox(
+    labels: np.ndarray,
+    face_label: int,
+) -> tuple[int, int, int, int] | None:
+    """Return (x1, y1, x2, y2) of face region from segmentation labels."""
+    ys, xs = np.where(labels == face_label)
+    if len(xs) == 0:
+        return None
+    return int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
 
+
+def get_face_bbox_insightface(
+    person_image: Image.Image,
+) -> tuple[int, int, int, int] | None:
+    """
+    Use InsightFace detector for a more precise face bounding box.
+    Falls back to segmentation bbox if InsightFace not loaded.
+    """
+    try:
+        face_app = get_model("face_app")
+        if face_app is None:
+            return None
+        import numpy as np, cv2
+        arr = cv2.cvtColor(np.array(person_image.convert("RGB")), cv2.COLOR_RGB2BGR)
+        faces = face_app.get(arr)
+        if not faces:
+            return None
+        # Return the largest detected face
+        face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+        x1, y1, x2, y2 = [int(v) for v in face.bbox]
+        return x1, y1, x2, y2
+    except Exception as exc:
+        logger.warning("InsightFace bbox failed: %s", exc)
+        return None
+
+
+def dilate_mask(mask: Image.Image, kernel_size: int = 15) -> Image.Image:
+    import cv2
     arr = np.array(mask)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
     dilated = cv2.dilate(arr, kernel, iterations=1)
     return Image.fromarray(dilated, mode="L")
+
+
+def exclude_face_from_mask(
+    mask: Image.Image,
+    face_bbox: tuple[int, int, int, int] | None,
+    padding: int = 30,
+) -> Image.Image:
+    """
+    Zero out the face region in the inpaint mask.
+    This is the primary identity preservation mechanism — diffusion never modifies this area.
+    """
+    if face_bbox is None:
+        return mask
+    arr = np.array(mask).copy()
+    x1, y1, x2, y2 = face_bbox
+    H, W = arr.shape
+    # Apply padding with bounds clipping
+    y1p = max(0, y1 - padding)
+    y2p = min(H, y2 + padding)
+    x1p = max(0, x1 - padding)
+    x2p = min(W, x2 + padding)
+    arr[y1p:y2p, x1p:x2p] = 0
+    return Image.fromarray(arr, mode="L")

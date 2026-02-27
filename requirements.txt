@@ -13,6 +13,12 @@ accelerate>=0.28.0
 controlnet-aux>=0.0.7
 xformers>=0.0.24           # comment out on CPU-only systems
 
+# ── Identity Preservation (Phase 2) ───────────────────────────────────────────
+insightface>=0.7.3         # ArcFace face embedding extraction
+ip-adapter               # IP-Adapter FaceID FaceID Plus for SDXL
+huggingface-hub>=0.21.0   # model weight download helper
+onnxruntime-gpu>=1.17.0   # insightface GPU backend (use onnxruntime for CPU)
+
 # ── Computer Vision ─────────────────────────────────────────────────────────────
 opencv-python-headless>=4.9.0.80
 Pillow>=10.2.0
@@ -20,9 +26,9 @@ mediapipe>=0.10.0
 scipy>=1.12.0
 numpy>=1.26.0
 
-# ── Queue ──────────────────────────────────────────────────────────────────────
-celery[redis]>=5.3.0
-redis>=5.0.0
-
 # ── Storage ────────────────────────────────────────────────────────────────────
 boto3>=1.34.0
+
+# ── Queue (kept for future production scaling – not active in Phase 2) ─────────
+celery[redis]>=5.3.0
+redis>=5.0.0

@@ -1,84 +1,59 @@
 /**
- * API client – communicates with the FastAPI backend.
+ * API client – Phase 2 (synchronous response).
+ * The API now returns the result directly in the POST response.
+ * No polling needed.
  */
 
-const API_BASE = "";   // empty = same origin; set to "http://localhost:8000" for local dev
+const API_BASE = "";  // empty = same origin
 
 /**
- * Submit a try-on job.
+ * Submit a try-on job and wait for the result directly.
  * @param {File} personFile
  * @param {File} clothingFile
- * @returns {Promise<string>} job_id
+ * @param {string} garmentCategory - "upper" | "full" | "lower"
+ * @param {(label: string) => void} onStep - called with step labels during wait
+ * @returns {Promise<{result_url?: string, result_b64?: string, job_id: string}>}
  */
-export async function submitTryOn(personFile, clothingFile) {
+export async function submitTryOn(personFile, clothingFile, garmentCategory = "upper", onStep) {
     const form = new FormData();
     form.append("person_image", personFile);
     form.append("clothing_image", clothingFile);
+    form.append("garment_category", garmentCategory);
 
-    const res = await fetch(`${API_BASE}/api/tryon`, {
-        method: "POST",
-        body: form,
-    });
+    // Simulate step labels while the server is processing
+    const steps = [
+        "Segmenting body…",
+        "Extracting pose…",
+        "Warping clothing…",
+        "Generating with SDXL…",
+        "Blending & finishing…",
+    ];
+    let stepIdx = 0;
+    const stepTimer = setInterval(() => {
+        if (stepIdx < steps.length) {
+            onStep?.(steps[stepIdx++]);
+        }
+    }, 3000);
 
-    if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || `Server error ${res.status}`);
+    try {
+        const res = await fetch(`${API_BASE}/api/tryon`, {
+            method: "POST",
+            body: form,
+        });
+
+        clearInterval(stepTimer);
+
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            const detail = err.detail;
+            if (typeof detail === "object") throw new Error(detail.error || "Server error");
+            throw new Error(detail || `Server error ${res.status}`);
+        }
+
+        const data = await res.json();
+        return data;
+    } catch (err) {
+        clearInterval(stepTimer);
+        throw err;
     }
-
-    const data = await res.json();
-    return data.job_id;
-}
-
-/**
- * Poll job status until complete or failed.
- * @param {string} jobId
- * @param {(meta: {step:string, progress:number}) => void} onProgress
- * @returns {Promise<{result_url?:string, result_b64?:string}>}
- */
-export async function pollJobStatus(jobId, onProgress) {
-    const INTERVAL = 1500;
-    const TIMEOUT = 120_000;
-    const started = Date.now();
-
-    return new Promise((resolve, reject) => {
-        const tick = async () => {
-            if (Date.now() - started > TIMEOUT) {
-                reject(new Error("Job timed out after 2 minutes"));
-                return;
-            }
-
-            try {
-                const res = await fetch(`${API_BASE}/api/tryon/${jobId}`);
-                if (!res.ok) {
-                    const err = await res.json().catch(() => ({}));
-                    reject(new Error(err.detail?.error || `Server error ${res.status}`));
-                    return;
-                }
-
-                const data = await res.json();
-
-                if (data.status === "completed") {
-                    resolve(data);
-                    return;
-                }
-
-                if (data.status === "failed" || data.status === "failure") {
-                    reject(new Error(data.error || "Pipeline failed"));
-                    return;
-                }
-
-                // Progress update
-                onProgress?.({
-                    step: data.step || data.status,
-                    progress: data.progress || 0,
-                });
-
-                setTimeout(tick, INTERVAL);
-            } catch (err) {
-                reject(err);
-            }
-        };
-
-        setTimeout(tick, INTERVAL);
-    });
 }

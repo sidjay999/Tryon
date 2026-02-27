@@ -1,22 +1,52 @@
-# 🧥 AI Virtual Try-On
+# 🧥 AI Virtual Try-On (Phase 2)
 
-> Production-grade SaaS virtual try-on platform powered by **Stable Diffusion XL + ControlNet**.
-> Upload a person photo and a clothing image — get a photorealistic 1024px try-on result in under 15 seconds.
-
-![Architecture](docs/architecture.md)
+> Production-grade SaaS virtual try-on platform powered by **SDXL + IP-Adapter FaceID + SDXL Refiner**.
+> Preserves user identity and facial realism. Generates 1024px photorealistic results in under 20 seconds.
 
 ---
 
-## ✨ Features
+## ✨ What's New in Phase 2
 
-- **SDXL + ControlNet** – pose-conditioned inpainting for photorealistic results
-- **Segformer B2 Clothes** – accurate human parsing and clothing mask extraction
-- **TPS Clothing Warp** – affine + thin-plate-spline geometric fitting
-- **Poisson Blending** – seamless boundary compositing + face identity preservation
-- **FP16 + xFormers** – memory-efficient inference on 24GB+ GPUs
-- **Async Queue** – Celery + Redis for non-blocking, scalable inference
-- **S3-Compatible Storage** – AWS S3, MinIO, Cloudflare R2
-- **Modern UI** – glassmorphism design, drag-and-drop, before/after slider
+| Upgrade | Effect |
+|---|---|
+| **Hard face mask exclusion** | Diffusion never touches the face region — zero identity drift |
+| **InsightFace ArcFace** | Precise face bounding box + embedding extraction |
+| **IP-Adapter FaceID Plus** | Conditions entire generation on face identity embeddings |
+| **SDXL Refiner pass** | Sharpens fabric/texture detail at 0.2 strength without altering identity |
+| **Synchronous API** | No Redis/Celery needed — single POST returns result directly |
+| **Simplified Docker** | 2 services (api + nginx) instead of 4 |
+| **Multi-garment support** | `garment_category` param: `upper` / `full` / `lower` |
+
+---
+
+## 🏗 Architecture
+
+```
+Person Photo + Clothing Image
+       │
+       ├─→ Segformer B2 Clothes: clothing mask + face bbox
+       ├─→ OpenPose: body keypoints (ControlNet conditioning)
+       └─→ InsightFace: ArcFace face embedding
+              │
+              ↓
+         Mask = clothing_mask MINUS face_region (hard exclusion)
+              │
+              ↓
+         IP-Adapter FaceID Plus
+         (conditions SDXL on face identity embedding)
+              │
+              ↓
+         SDXL Inpainting (only touches clothing region)
+              │
+              ↓
+         SDXL Refiner (strength=0.2 — texture detail only)
+              │
+              ↓
+         Blend: Poisson clone + Gaussian face paste + histogram match
+              │
+              ↓
+         1024px output — face identical to input photo
+```
 
 ---
 
@@ -24,27 +54,27 @@
 
 ```
 tryon/
-├── app/                   # FastAPI backend
-│   ├── main.py            # App entry point + lifespan model loading
-│   ├── config.py          # Pydantic Settings (env-driven)
-│   ├── models/loader.py   # Model preloader (SDXL, ControlNet, Segformer, OpenPose)
-│   ├── pipeline/          # 5-stage ML pipeline
-│   │   ├── segmentation.py
-│   │   ├── pose.py
-│   │   ├── warping.py
-│   │   ├── inpainting.py
-│   │   └── blending.py
-│   ├── routers/           # API endpoints
-│   ├── queue/             # Celery worker + tasks
-│   ├── storage/           # S3 adapter
-│   └── utils/             # Image utilities
-├── frontend/              # Vanilla HTML/CSS/JS SPA
-├── nginx/                 # Reverse proxy config
-├── scripts/               # Startup scripts
-├── docs/                  # Architecture, API, optimization notes
+├── app/
+│   ├── main.py             # FastAPI entry point + model preload
+│   ├── config.py           # All settings (env-driven, Pydantic)
+│   ├── models/loader.py    # SDXL + InsightFace + IP-Adapter + Refiner
+│   ├── pipeline/
+│   │   ├── segmentation.py # Segformer + face bbox + mask exclusion
+│   │   ├── pose.py         # OpenPose keypoints
+│   │   ├── warping.py      # Affine + TPS clothing warp
+│   │   ├── inpainting.py   # SDXL + IP-Adapter FaceID + Refiner
+│   │   └── blending.py     # Poisson + Gaussian face paste + histogram
+│   ├── queue/tasks.py      # Synchronous pipeline orchestrator
+│   ├── routers/tryon.py    # POST /api/tryon (synchronous)
+│   └── storage/s3.py       # S3 adapter (optional)
+├── frontend/               # Vanilla HTML/CSS/JS SPA
+├── nginx/nginx.conf        # Reverse proxy
 ├── Dockerfile
-├── docker-compose.yml
-└── .env.example
+├── docker-compose.yml      # 2 services: api + nginx
+├── .env.example
+├── requirements.txt
+├── SETUP_GUIDE.md          # Full beginner setup guide
+└── README.md
 ```
 
 ---
@@ -53,103 +83,92 @@ tryon/
 
 ### Prerequisites
 - Docker + Docker Compose v2
-- NVIDIA GPU with ≥24GB VRAM + NVIDIA Container Toolkit
-- ~20GB disk space (model weights)
+- NVIDIA GPU ≥ 18GB VRAM (24GB recommended)
+- NVIDIA Container Toolkit installed (see `SETUP_GUIDE.md`)
 
 ### 1. Clone and configure
-
 ```bash
-git clone <your-repo> tryon
+git clone https://github.com/sidjay999/Tryon.git tryon
 cd tryon
 cp .env.example .env
-# Edit .env — add S3 credentials if desired
 ```
 
 ### 2. Launch
-
 ```bash
 docker compose up --build
 ```
 
-> ⚠️ **First run:** models are downloaded from Hugging Face (~15GB). This takes 20–40 minutes. Subsequent starts load from the `model_cache` volume in ~90 seconds.
+> ⏳ **First run:** Downloads ~17GB of model weights (SDXL + Refiner + Segformer + IP-Adapter).
+> Takes 30–50 minutes. Cached in Docker volume for all subsequent starts (~90s).
 
-### 3. Open the UI
-
+### 3. Open the app
 ```
-http://localhost
+http://localhost           # UI
+http://localhost/docs      # API Swagger docs
+http://localhost/health    # GPU + model status
 ```
-
-API Docs: `http://localhost/docs`
 
 ---
 
-## ☁️ Deployment
-
-### AWS EC2 (g5.xlarge – A10G 24GB)
-
-```bash
-# 1. Launch g5.xlarge with Deep Learning AMI (Ubuntu 22.04)
-# 2. Install Docker + NVIDIA Container Toolkit
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker ubuntu
-
-# NVIDIA Container Toolkit
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-ct.gpg
-echo "deb [signed-by=/usr/share/keyrings/nvidia-ct.gpg] https://nvidia.github.io/libnvidia-container/stable/deb/$(. /etc/os-release; echo $ID$VERSION_ID) /" | sudo tee /etc/apt/sources.list.d/nvidia-ct.list
-sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
-sudo systemctl restart docker
-
-# 3. Deploy
-git clone <your-repo> tryon && cd tryon
-cp .env.example .env   # fill in S3 credentials
-docker compose up -d --build
-```
-
-### RunPod
-
-1. Create a pod with **NVIDIA A4000/A6000**, runtime image: `nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04`
-2. Open HTTP port 80
-3. Clone repo, configure `.env`, run `docker compose up --build`
-
----
-
-## ⚙️ Configuration
-
-See `.env.example` for all options. Key variables:
+## ⚙️ Configuration Reference
 
 | Variable | Default | Description |
 |---|---|---|
 | `DEVICE` | `cuda` | `cuda` or `cpu` |
-| `USE_FP16` | `true` | Enable FP16 precision |
-| `USE_XFORMERS` | `true` | Enable xFormers attention |
-| `NUM_INFERENCE_STEPS` | `30` | Diffusion steps (20=fast, 50=best) |
-| `OUTPUT_SIZE` | `1024` | Output image size in pixels |
-| `S3_BUCKET` | `tryon-results` | S3 bucket for results |
-| `REDIS_URL` | `redis://redis:6379/0` | Celery broker URL |
+| `USE_FP16` | `true` | FP16 to halve VRAM |
+| `USE_XFORMERS` | `true` | xFormers attention |
+| `NUM_INFERENCE_STEPS` | `30` | Quality/speed tradeoff |
+| `OUTPUT_SIZE` | `1024` | Output resolution |
+| `USE_REFINER` | `true` | SDXL Refiner pass |
+| `REFINER_STRENGTH` | `0.2` | 0.15–0.3 recommended |
+| `FACE_MASK_PADDING` | `30` | Face exclusion padding in px |
+| `IP_ADAPTER_SCALE` | `0.7` | FaceID identity lock strength |
+| `FACE_IDENTITY_ENABLED` | `true` | Disable if InsightFace unavailable |
 
 ---
 
-## 📖 Documentation
+## 🧪 API
+
+```bash
+# Upload and get result in one call
+curl -X POST http://localhost/api/tryon \
+  -F person_image=@person.jpg \
+  -F clothing_image=@shirt.jpg \
+  -F garment_category=upper
+
+# Garment categories:
+# upper  → t-shirts, shirts, jackets (recommended for best quality)
+# full   → dresses, sarees, full outfits
+# lower  → jeans, trousers (experimental)
+```
+
+---
+
+## 🔧 Production Scaling (When Ready)
+
+To re-enable Celery + Redis for concurrent inference:
+1. Uncomment the `redis` and `worker` sections in `docker-compose.yml`
+2. Set `REDIS_URL=redis://redis:6379/0` in `.env`
+3. Switch `routers/tryon.py` back to async enqueue pattern
+
+---
+
+## 📊 Performance
+
+| GPU | Inference Time | VRAM |
+|---|---|---|
+| A10G (24GB) | ~13–18s | ~17GB |
+| A100 (40GB) | ~8–12s | ~17GB |
+| RTX 4090 (24GB) | ~10–15s | ~17GB |
+| RTX 3090 (24GB) | ~15–20s | ~17GB (tight — disable refiner if OOM) |
+
+---
+
+## 📖 Docs
 
 | Doc | Description |
 |---|---|
-| [Architecture](docs/architecture.md) | System overview + Mermaid diagrams |
-| [API Reference](docs/api.md) | Endpoint docs + curl / Python examples |
-| [Model Optimization](docs/model_optimization.md) | FP16, xFormers, VAE tiling, batching |
-
----
-
-## 📊 Performance Targets
-
-| GPU | Inference Time | Quality |
-|---|---|---|
-| A10G (24GB) | ~10-13s | ✅ Production |
-| A100 (40GB) | ~6-9s | ✅ Best |
-| RTX 4090 (24GB) | ~8-11s | ✅ Production |
-| RTX 3090 (24GB) | ~12-15s | ✅ Acceptable |
-
----
-
-## 📜 License
-
-MIT — feel free to use for commercial and non-commercial projects.
+| [SETUP_GUIDE.md](SETUP_GUIDE.md) | Full beginner GPU/Docker setup guide |
+| [docs/architecture.md](docs/architecture.md) | System diagrams |
+| [docs/api.md](docs/api.md) | API reference |
+| [docs/model_optimization.md](docs/model_optimization.md) | FP16, xFormers, batching notes |
