@@ -167,7 +167,8 @@ def run_inpainting(
     if settings.face_identity_enabled:
         face_embedding = _extract_face_embedding(person_resized)
 
-    generator = torch.Generator(device=device).manual_seed(42)
+    # Generator on CPU is safe with both full-GPU and cpu-offload modes
+    generator = torch.Generator(device="cpu").manual_seed(42)
 
     # ── STEP 3: Generate ──────────────────────────────────────
     ip_model = get_model("ip_adapter")
@@ -184,10 +185,13 @@ def run_inpainting(
             prompt, negative_prompt, generator,
         )
 
-    # ── STEP 4: Refiner pass ──────────────────────────────────
-    if settings.use_refiner and get_model("refiner_pipe") is not None:
-        logger.info("Running SDXL Refiner (strength=%.2f) …", settings.refiner_strength)
+    # ── STEP 4: Refiner pass (skipped on low VRAM — refiner_pipe will be None) ─
+    refiner_pipe = get_model("refiner_pipe", optional=True)
+    if settings.use_refiner and refiner_pipe is not None:
+        logger.info("Running SDXL Refiner (strength=%.2f) ...", settings.refiner_strength)
         generated = _run_refiner(generated, prompt, generator)
+    elif refiner_pipe is None:
+        logger.info("Refiner skipped (not loaded — low VRAM mode)")
 
     logger.info("Inpainting complete — size: %s", generated.size)
     return generated

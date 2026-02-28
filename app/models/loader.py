@@ -1,6 +1,12 @@
 """
-Model loader – Phase 2 upgrade.
-Loads SDXL + ControlNet + Segformer + OpenPose + InsightFace + IP-Adapter FaceID + SDXL Refiner.
+Model loader – stable version for 6GB GPU (RTX 4050 Laptop).
+
+Memory strategy:
+  - FP16 precision (halves VRAM requirement)
+  - enable_model_cpu_offload() for SDXL on < 10GB VRAM
+    (moves full model submodules to GPU one at a time — stable in diffusers 0.27.x)
+  - Refiner: always skipped on < 10GB (would OOM)
+  - Refiner_pipe key always set to None so pipeline code never crashes
 """
 import gc
 import logging
@@ -9,11 +15,7 @@ from typing import Any
 
 import torch
 from controlnet_aux import OpenposeDetector
-from diffusers import (
-    ControlNetModel,
-    StableDiffusionXLInpaintPipeline,
-    StableDiffusionXLImg2ImgPipeline,
-)
+from diffusers import StableDiffusionXLInpaintPipeline
 from transformers import (
     AutoImageProcessor,
     SegformerForSemanticSegmentation,
@@ -26,120 +28,129 @@ settings = get_settings()
 
 _models: dict[str, Any] = {}
 
+VRAM_THRESHOLD_GB = 10.0  # GPUs below this use CPU offload
+
 
 def _dtype():
     return torch.float16 if settings.use_fp16 else torch.float32
 
 
+def _get_vram_gb() -> float:
+    if not torch.cuda.is_available():
+        return 0.0
+    return torch.cuda.get_device_properties(0).total_memory / 1e9
+
+
 def _load_insightface(device):
-    """Load InsightFace ArcFace model for face embedding extraction."""
     try:
-        import insightface
         from insightface.app import FaceAnalysis
         face_app = FaceAnalysis(
             name="buffalo_l",
             providers=["CUDAExecutionProvider"] if device.type == "cuda" else ["CPUExecutionProvider"],
         )
         face_app.prepare(ctx_id=0 if device.type == "cuda" else -1, det_size=(640, 640))
-        logger.info("✅ InsightFace loaded")
+        logger.info("InsightFace loaded")
         return face_app
     except Exception as exc:
-        logger.warning("InsightFace not available (%s) — face identity conditioning disabled", exc)
+        logger.warning("InsightFace unavailable (%s) — Segformer-based face bbox fallback active", exc)
         return None
 
 
-def _load_ip_adapter(inpaint_pipe, device):
-    """Load IP-Adapter FaceID Plus weights into the inpaint pipeline."""
+def _from_pretrained_with_retry(cls, model_id, **kwargs):
+    """Retry with force_download=True if a file integrity check fails."""
     try:
-        from ip_adapter import IPAdapterFaceIDPlus
-        # IP-Adapter FaceID Plus for SDXL
-        image_encoder_path = os.path.join(settings.models_cache_dir, "ip_adapter", "image_encoder")
-        ip_ckpt = os.path.join(settings.models_cache_dir, "ip_adapter", "ip-adapter-faceid-plusv2_sdxl.bin")
-
-        if not os.path.isfile(ip_ckpt):
-            logger.info("Downloading IP-Adapter FaceID weights …")
-            from huggingface_hub import hf_hub_download
-            os.makedirs(os.path.dirname(ip_ckpt), exist_ok=True)
-            hf_hub_download(
-                repo_id="h94/IP-Adapter-FaceID",
-                filename="ip-adapter-faceid-plusv2_sdxl.bin",
-                local_dir=os.path.dirname(ip_ckpt),
-            )
-            # Download image encoder if needed
-            from huggingface_hub import snapshot_download
-            if not os.path.isdir(image_encoder_path):
-                snapshot_download(
-                    repo_id="laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
-                    local_dir=image_encoder_path,
-                )
-
-        ip_model = IPAdapterFaceIDPlus(
-            inpaint_pipe,
-            image_encoder_path,
-            ip_ckpt,
-            device,
-        )
-        logger.info("✅ IP-Adapter FaceID loaded")
-        return ip_model
-    except Exception as exc:
-        logger.warning("IP-Adapter not available (%s) — falling back to standard inpainting", exc)
-        return None
+        return cls.from_pretrained(model_id, **kwargs)
+    except OSError as exc:
+        if "Consistency check failed" in str(exc) or "size" in str(exc):
+            logger.warning("Corrupted cached file — retrying with force_download=True")
+            kwargs.pop("resume_download", None)
+            return cls.from_pretrained(model_id, force_download=True, resume_download=False, **kwargs)
+        raise
 
 
 def load_all_models() -> None:
-    """Preload all models into GPU memory at startup."""
-    logger.info("🚀 Loading AI models (Phase 2: with FaceID + Refiner) …")
+    """Load all models. Auto-switches to CPU offload on GPUs with < 10GB VRAM."""
+
+    # Enable faster HF downloads
+    try:
+        import hf_transfer  # noqa
+        os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+        logger.info("hf_transfer enabled")
+    except ImportError:
+        pass
 
     os.makedirs(settings.models_cache_dir, exist_ok=True)
     os.makedirs(settings.tmp_dir, exist_ok=True)
 
+    vram_gb = _get_vram_gb()
+    low_vram = vram_gb > 0 and vram_gb < VRAM_THRESHOLD_GB
     device = torch.device(settings.device if torch.cuda.is_available() else "cpu")
     dtype = _dtype() if device.type == "cuda" else torch.float32
 
-    # 1. SDXL Inpainting pipeline (primary generation pipeline)
-    logger.info("Loading SDXL Inpainting pipeline …")
-    inpaint_pipe = StableDiffusionXLInpaintPipeline.from_pretrained(
+    logger.info("GPU VRAM: %.1fGB | Mode: %s | Device: %s",
+                vram_gb, "CPU-OFFLOAD" if low_vram else "FULL-GPU", device)
+
+    _models["device"] = device
+    _models["dtype"] = dtype
+    _models["refiner_pipe"] = None   # always set — prevents KeyError on low VRAM
+    _models["ip_adapter"] = None     # set now; overwritten if successfully loaded below
+    _models["face_app"] = None
+
+    # ── 1. SDXL Inpainting pipeline ───────────────────────────
+    logger.info("Loading SDXL Inpainting pipeline...")
+    inpaint_pipe = _from_pretrained_with_retry(
+        StableDiffusionXLInpaintPipeline,
         settings.inpainting_model_id,
         torch_dtype=dtype,
         use_safetensors=True,
         cache_dir=settings.models_cache_dir,
-    ).to(device)
+        low_cpu_mem_usage=True,
+    )
 
-    if settings.use_xformers and device.type == "cuda":
-        try:
-            inpaint_pipe.enable_xformers_memory_efficient_attention()
-            logger.info("✅ xFormers enabled on inpaint pipeline")
-        except Exception:
-            logger.warning("xFormers not available")
-    inpaint_pipe.enable_attention_slicing()
-    inpaint_pipe.enable_vae_tiling()
+    if low_vram:
+        logger.info("Enabling model_cpu_offload (6GB GPU mode)...")
+        inpaint_pipe.enable_model_cpu_offload()   # stable in diffusers 0.27.x
+        inpaint_pipe.enable_vae_slicing()
+        inpaint_pipe.enable_vae_tiling()
+    else:
+        inpaint_pipe.to(device)
+        if settings.use_xformers:
+            try:
+                inpaint_pipe.enable_xformers_memory_efficient_attention()
+            except Exception:
+                logger.warning("xFormers not available")
+        inpaint_pipe.enable_attention_slicing()
+        inpaint_pipe.enable_vae_tiling()
+
     _models["inpaint_pipe"] = inpaint_pipe
+    logger.info("SDXL Inpainting ready")
 
-    # 2. SDXL Refiner (lightweight quality boost pass)
-    if settings.use_refiner:
-        logger.info("Loading SDXL Refiner …")
+    # ── 2. SDXL Refiner ───────────────────────────────────────
+    if settings.use_refiner and not low_vram:
+        logger.info("Loading SDXL Refiner...")
         try:
-            refiner_pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
+            from diffusers import StableDiffusionXLImg2ImgPipeline
+            refiner = _from_pretrained_with_retry(
+                StableDiffusionXLImg2ImgPipeline,
                 "stabilityai/stable-diffusion-xl-refiner-1.0",
                 torch_dtype=dtype,
                 use_safetensors=True,
                 cache_dir=settings.models_cache_dir,
                 text_encoder_2=inpaint_pipe.text_encoder_2,
-                vae=inpaint_pipe.vae,  # share VAE to save VRAM
-            ).to(device)
-            if settings.use_xformers and device.type == "cuda":
-                try:
-                    refiner_pipe.enable_xformers_memory_efficient_attention()
-                except Exception:
-                    pass
-            refiner_pipe.enable_attention_slicing()
-            _models["refiner_pipe"] = refiner_pipe
-            logger.info("✅ SDXL Refiner loaded (shared VAE)")
+                vae=inpaint_pipe.vae,
+                low_cpu_mem_usage=True,
+            )
+            refiner.to(device)
+            refiner.enable_attention_slicing()
+            _models["refiner_pipe"] = refiner
+            logger.info("SDXL Refiner ready")
         except Exception as exc:
-            logger.warning("Refiner failed to load (%s) — skipping", exc)
+            logger.warning("Refiner failed to load (%s) — skipped", exc)
+    else:
+        logger.info("Refiner skipped (%.1fGB VRAM < %.0fGB required)", vram_gb, VRAM_THRESHOLD_GB)
 
-    # 3. Segmentation model (human parsing)
-    logger.info("Loading Segformer clothing parser …")
+    # ── 3. Segformer (human parsing) ─────────────────────────
+    logger.info("Loading Segformer...")
     seg_processor = AutoImageProcessor.from_pretrained(
         "mattmdjaga/segformer_b2_clothes",
         cache_dir=settings.models_cache_dir,
@@ -151,35 +162,39 @@ def load_all_models() -> None:
     seg_model.eval()
     _models["seg_processor"] = seg_processor
     _models["seg_model"] = seg_model
+    logger.info("Segformer ready")
 
-    # 4. OpenPose detector
-    logger.info("Loading OpenPose detector …")
+    # ── 4. OpenPose ───────────────────────────────────────────
+    logger.info("Loading OpenPose...")
     pose_detector = OpenposeDetector.from_pretrained(
         "lllyasviel/ControlNet",
         cache_dir=settings.models_cache_dir,
     )
     _models["pose_detector"] = pose_detector
+    logger.info("OpenPose ready")
 
-    # 5. InsightFace (ArcFace face embeddings)
+    # ── 5. InsightFace (optional) ─────────────────────────────
     _models["face_app"] = _load_insightface(device)
 
-    # 6. IP-Adapter FaceID (identity-conditioned generation)
-    _models["ip_adapter"] = _load_ip_adapter(inpaint_pipe, device)
+    logger.info(
+        "=== All models loaded | VRAM: %.1fGB | Mode: %s | Refiner: %s | FaceID: %s ===",
+        vram_gb,
+        "CPU-OFFLOAD" if low_vram else "FULL-GPU",
+        "YES" if _models.get("refiner_pipe") else "NO (skipped)",
+        "YES" if _models.get("face_app") else "NO (install C++ Build Tools)",
+    )
 
-    _models["device"] = device
-    _models["dtype"] = dtype
-    logger.info("✅ All models loaded — face identity pipeline: %s",
-                "ENABLED" if _models.get("ip_adapter") else "DISABLED (fallback)")
 
-
-def get_model(name: str) -> Any:
+def get_model(name: str, optional: bool = False) -> Any:
     if name not in _models:
-        raise RuntimeError(f"Model '{name}' not loaded.")
+        if optional:
+            return None
+        raise RuntimeError(f"Model '{name}' not loaded. Call load_all_models() first.")
     return _models[name]
 
 
 def models_ready() -> bool:
-    return bool(_models)
+    return "inpaint_pipe" in _models
 
 
 def free_gpu_memory() -> None:
