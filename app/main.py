@@ -1,5 +1,5 @@
 """
-FastAPI application entry point.
+FastAPI application entry point – CatVTON Production Pipeline.
 Models are preloaded at startup via lifespan context manager.
 """
 import logging
@@ -25,18 +25,24 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load models on startup, clean up on shutdown."""
-    logger.info("=== AI Virtual Try-On API starting up ===")
-    load_all_models()
+    import traceback
+    logger.info("=== CatVTON Virtual Try-On API starting up ===")
+    try:
+        load_all_models()
+    except Exception:
+        logger.critical("MODEL LOADING FAILED:\n%s", traceback.format_exc())
+        raise
     yield
     logger.info("=== Shutting down ===")
 
 
 app = FastAPI(
-    title=settings.api_title,
-    version=settings.api_version,
+    title="CatVTON Virtual Try-On API",
+    version="2.0.0",
     description=(
-        "Production-grade AI Virtual Try-On API powered by "
-        "Stable Diffusion XL + ControlNet."
+        "Production-grade AI Virtual Try-On API powered by CatVTON "
+        "(ICLR 2025). DensePose + SCHP human parsing with learned "
+        "diffusion-based garment transfer at 1024×768."
     ),
     docs_url="/docs",
     redoc_url="/redoc",
@@ -56,7 +62,7 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(tryon.router)
 
-# Serve frontend static files (when running without Nginx)
+# Serve frontend static files
 frontend_path = os.path.join(os.path.dirname(__file__), "..", "frontend")
 if os.path.isdir(frontend_path):
     app.mount("/", StaticFiles(directory=frontend_path, html=True), name="frontend")

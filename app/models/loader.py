@@ -1,203 +1,110 @@
 """
-Model loader – stable version for 6GB GPU (RTX 4050 Laptop).
-
-Memory strategy:
-  - FP16 precision (halves VRAM requirement)
-  - enable_model_cpu_offload() for SDXL on < 10GB VRAM
-    (moves full model submodules to GPU one at a time — stable in diffusers 0.27.x)
-  - Refiner: always skipped on < 10GB (would OOM)
-  - Refiner_pipe key always set to None so pipeline code never crashes
+Model loader – CatVTON Production Pipeline.
+Loads: CatVTON diffusion pipeline + AutoMasker (DensePose + SCHP).
 """
-import gc
 import logging
 import os
-from typing import Any
-
+import sys
 import torch
-from controlnet_aux import OpenposeDetector
-from diffusers import StableDiffusionXLInpaintPipeline
-from transformers import (
-    AutoImageProcessor,
-    SegformerForSemanticSegmentation,
-)
+from huggingface_hub import snapshot_download
 
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
-settings = get_settings()
 
-_models: dict[str, Any] = {}
-
-VRAM_THRESHOLD_GB = 10.0  # GPUs below this use CPU offload
+# Global model registry
+_models: dict = {}
 
 
-def _dtype():
-    return torch.float16 if settings.use_fp16 else torch.float32
+def _init_weight_dtype(precision: str) -> torch.dtype:
+    """Convert precision string to torch dtype."""
+    if precision == "fp16":
+        return torch.float16
+    elif precision == "bf16":
+        return torch.bfloat16
+    return torch.float32
 
 
-def _get_vram_gb() -> float:
-    if not torch.cuda.is_available():
-        return 0.0
-    return torch.cuda.get_device_properties(0).total_memory / 1e9
+def load_all_models():
+    """Load CatVTON pipeline + AutoMasker. Called once at startup."""
+    settings = get_settings()
+    device = settings.device
+    weight_dtype = _init_weight_dtype(settings.mixed_precision)
 
+    logger.info("GPU: %s | Device: %s | Precision: %s",
+                torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU",
+                device, settings.mixed_precision)
 
-def _load_insightface(device):
-    try:
-        from insightface.app import FaceAnalysis
-        face_app = FaceAnalysis(
-            name="buffalo_l",
-            providers=["CUDAExecutionProvider"] if device.type == "cuda" else ["CPUExecutionProvider"],
+    # ── 1. Download CatVTON checkpoint from HuggingFace ────────
+    logger.info("Downloading CatVTON checkpoint (first run only)...")
+    repo_path = snapshot_download(
+        repo_id=settings.catvton_repo_id,
+        cache_dir=settings.models_cache_dir,
+    )
+    logger.info("CatVTON checkpoint at: %s", repo_path)
+    _models["repo_path"] = repo_path
+
+    # ── 2. Find CatVTON source directory ───────────────────────
+    # CatVTON source is cloned alongside our project
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    catvton_dir = settings.catvton_dir or os.path.join(project_root, "CatVTON")
+    if not os.path.isdir(catvton_dir):
+        # Try alternative location
+        catvton_dir = os.path.join(project_root, "catvton_lib")
+    if not os.path.isdir(catvton_dir):
+        raise FileNotFoundError(
+            f"CatVTON source not found. Expected at {catvton_dir}. "
+            "Clone it: git clone https://github.com/Zheng-Chong/CatVTON.git CatVTON"
         )
-        face_app.prepare(ctx_id=0 if device.type == "cuda" else -1, det_size=(640, 640))
-        logger.info("InsightFace loaded")
-        return face_app
-    except Exception as exc:
-        logger.warning("InsightFace unavailable (%s) — Segformer-based face bbox fallback active", exc)
-        return None
+    logger.info("CatVTON source at: %s", catvton_dir)
 
+    # Add CatVTON to Python path so its imports work
+    if catvton_dir not in sys.path:
+        sys.path.insert(0, catvton_dir)
 
-def _from_pretrained_with_retry(cls, model_id, **kwargs):
-    """Retry with force_download=True if a file integrity check fails."""
-    try:
-        return cls.from_pretrained(model_id, **kwargs)
-    except OSError as exc:
-        if "Consistency check failed" in str(exc) or "size" in str(exc):
-            logger.warning("Corrupted cached file — retrying with force_download=True")
-            kwargs.pop("resume_download", None)
-            return cls.from_pretrained(model_id, force_download=True, resume_download=False, **kwargs)
-        raise
+    # ── 3. Load CatVTON Pipeline ───────────────────────────────
+    from model.pipeline import CatVTONPipeline  # noqa: E402
 
+    logger.info("Loading CatVTON pipeline (base: %s)...", settings.base_model_id)
+    pipeline = CatVTONPipeline(
+        base_ckpt=settings.base_model_id,
+        attn_ckpt=repo_path,
+        attn_ckpt_version=settings.attn_ckpt_version,
+        weight_dtype=weight_dtype,
+        device=device,
+        skip_safety_check=True,  # We handle safety ourselves
+        use_tf32=True,
+    )
+    _models["pipeline"] = pipeline
+    logger.info("CatVTON pipeline loaded (%s)", settings.mixed_precision)
 
-def load_all_models() -> None:
-    """Load all models. Auto-switches to CPU offload on GPUs with < 10GB VRAM."""
+    # ── 4. Load AutoMasker (DensePose + SCHP) ──────────────────
+    from model.cloth_masker import AutoMasker  # noqa: E402
 
-    # Enable faster HF downloads
-    try:
-        import hf_transfer  # noqa
-        os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
-        logger.info("hf_transfer enabled")
-    except ImportError:
-        pass
+    logger.info("Loading AutoMasker (DensePose + SCHP)...")
+    automasker = AutoMasker(
+        densepose_ckpt=os.path.join(repo_path, "DensePose"),
+        schp_ckpt=os.path.join(repo_path, "SCHP"),
+        device=device,
+    )
+    _models["automasker"] = automasker
+    logger.info("AutoMasker loaded")
 
-    os.makedirs(settings.models_cache_dir, exist_ok=True)
-    os.makedirs(settings.tmp_dir, exist_ok=True)
-
-    vram_gb = _get_vram_gb()
-    low_vram = vram_gb > 0 and vram_gb < VRAM_THRESHOLD_GB
-    device = torch.device(settings.device if torch.cuda.is_available() else "cpu")
-    dtype = _dtype() if device.type == "cuda" else torch.float32
-
-    logger.info("GPU VRAM: %.1fGB | Mode: %s | Device: %s",
-                vram_gb, "CPU-OFFLOAD" if low_vram else "FULL-GPU", device)
-
+    # ── 5. Store metadata ──────────────────────────────────────
     _models["device"] = device
-    _models["dtype"] = dtype
-    _models["refiner_pipe"] = None   # always set — prevents KeyError on low VRAM
-    _models["ip_adapter"] = None     # set now; overwritten if successfully loaded below
-    _models["face_app"] = None
+    _models["dtype"] = weight_dtype
+    _models["settings"] = settings
 
-    # ── 1. SDXL Inpainting pipeline ───────────────────────────
-    logger.info("Loading SDXL Inpainting pipeline...")
-    inpaint_pipe = _from_pretrained_with_retry(
-        StableDiffusionXLInpaintPipeline,
-        settings.inpainting_model_id,
-        torch_dtype=dtype,
-        use_safetensors=True,
-        cache_dir=settings.models_cache_dir,
-        low_cpu_mem_usage=True,
-    )
-
-    if low_vram:
-        logger.info("Enabling model_cpu_offload (6GB GPU mode)...")
-        inpaint_pipe.enable_model_cpu_offload()   # stable in diffusers 0.27.x
-        inpaint_pipe.enable_vae_slicing()
-        inpaint_pipe.enable_vae_tiling()
-    else:
-        inpaint_pipe.to(device)
-        if settings.use_xformers:
-            try:
-                inpaint_pipe.enable_xformers_memory_efficient_attention()
-            except Exception:
-                logger.warning("xFormers not available")
-        inpaint_pipe.enable_attention_slicing()
-        inpaint_pipe.enable_vae_tiling()
-
-    _models["inpaint_pipe"] = inpaint_pipe
-    logger.info("SDXL Inpainting ready")
-
-    # ── 2. SDXL Refiner ───────────────────────────────────────
-    if settings.use_refiner and not low_vram:
-        logger.info("Loading SDXL Refiner...")
-        try:
-            from diffusers import StableDiffusionXLImg2ImgPipeline
-            refiner = _from_pretrained_with_retry(
-                StableDiffusionXLImg2ImgPipeline,
-                "stabilityai/stable-diffusion-xl-refiner-1.0",
-                torch_dtype=dtype,
-                use_safetensors=True,
-                cache_dir=settings.models_cache_dir,
-                text_encoder_2=inpaint_pipe.text_encoder_2,
-                vae=inpaint_pipe.vae,
-                low_cpu_mem_usage=True,
-            )
-            refiner.to(device)
-            refiner.enable_attention_slicing()
-            _models["refiner_pipe"] = refiner
-            logger.info("SDXL Refiner ready")
-        except Exception as exc:
-            logger.warning("Refiner failed to load (%s) — skipped", exc)
-    else:
-        logger.info("Refiner skipped (%.1fGB VRAM < %.0fGB required)", vram_gb, VRAM_THRESHOLD_GB)
-
-    # ── 3. Segformer (human parsing) ─────────────────────────
-    logger.info("Loading Segformer...")
-    seg_processor = AutoImageProcessor.from_pretrained(
-        "mattmdjaga/segformer_b2_clothes",
-        cache_dir=settings.models_cache_dir,
-    )
-    seg_model = SegformerForSemanticSegmentation.from_pretrained(
-        "mattmdjaga/segformer_b2_clothes",
-        cache_dir=settings.models_cache_dir,
-    ).to(device)
-    seg_model.eval()
-    _models["seg_processor"] = seg_processor
-    _models["seg_model"] = seg_model
-    logger.info("Segformer ready")
-
-    # ── 4. OpenPose ───────────────────────────────────────────
-    logger.info("Loading OpenPose...")
-    pose_detector = OpenposeDetector.from_pretrained(
-        "lllyasviel/ControlNet",
-        cache_dir=settings.models_cache_dir,
-    )
-    _models["pose_detector"] = pose_detector
-    logger.info("OpenPose ready")
-
-    # ── 5. InsightFace (optional) ─────────────────────────────
-    _models["face_app"] = _load_insightface(device)
-
-    logger.info(
-        "=== All models loaded | VRAM: %.1fGB | Mode: %s | Refiner: %s | FaceID: %s ===",
-        vram_gb,
-        "CPU-OFFLOAD" if low_vram else "FULL-GPU",
-        "YES" if _models.get("refiner_pipe") else "NO (skipped)",
-        "YES" if _models.get("face_app") else "NO (install C++ Build Tools)",
-    )
+    vram = torch.cuda.get_device_properties(0).total_mem / 1024**3 if torch.cuda.is_available() else 0
+    logger.info("=== All models loaded | VRAM: %.1fGB | CatVTON | DensePose+SCHP ===", vram)
 
 
-def get_model(name: str, optional: bool = False) -> Any:
-    if name not in _models:
+def get_model(key: str, optional: bool = False):
+    """Get a loaded model by key."""
+    if key not in _models:
         if optional:
             return None
-        raise RuntimeError(f"Model '{name}' not loaded. Call load_all_models() first.")
-    return _models[name]
-
-
-def models_ready() -> bool:
-    return "inpaint_pipe" in _models
-
-
-def free_gpu_memory() -> None:
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        raise RuntimeError(
+            f"Model '{key}' not loaded. Available: {list(_models.keys())}"
+        )
+    return _models[key]

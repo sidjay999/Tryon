@@ -1,108 +1,106 @@
 """
-Synchronous pipeline orchestrator – Phase 2.
-Replaces the Celery task for the prototype stage.
-The full 5-stage pipeline runs in-process within the FastAPI request.
+Pipeline orchestration – CatVTON Production Pipeline.
+3-stage pipeline: AutoMasker → CatVTON Diffusion → Output
 """
 import io
 import logging
-import traceback
-import uuid
+import time
 
+import torch
+from diffusers.image_processor import VaeImageProcessor
 from PIL import Image
 
-from app.config import get_settings
-from app.models.loader import free_gpu_memory
-from app.pipeline.blending import blend_result
-from app.pipeline.inpainting import run_inpainting
-from app.pipeline.pose import extract_pose
-from app.pipeline.segmentation import dilate_mask, exclude_face_from_mask, segment_person
-from app.pipeline.warping import warp_clothing
-from app.storage import s3
-from app.utils.image import encode_image_base64, resize_to_square
+from app.models.loader import get_model
 
 logger = logging.getLogger(__name__)
-settings = get_settings()
 
 
 def run_tryon_pipeline_sync(
     person_image_bytes: bytes,
     clothing_image_bytes: bytes,
-    job_id: str | None = None,
-    garment_category: str = "upper",  # "upper" | "full" | "lower"
+    job_id: str,
+    garment_category: str = "upper",
 ) -> dict:
     """
-    Synchronous Phase 2 pipeline:
-      1. Segmentation  → clothing mask + face bbox
-      2. Pose          → ControlNet keypoint image
-      3. Warp          → affine + TPS clothing alignment
-      4. Inpaint       → SDXL + IP-Adapter FaceID (face hard-protected)
-      5. Blend         → Poisson + Gaussian face paste + histogram
-    Returns result dict with result_url or result_b64.
+    Run the full CatVTON virtual try-on pipeline synchronously.
+
+    Args:
+        person_image_bytes: Raw bytes of person image
+        clothing_image_bytes: Raw bytes of garment image
+        job_id: Unique job identifier
+        garment_category: "upper" | "lower" | "overall"
+    Returns:
+        dict with result_image (base64) and metadata
     """
-    job_id = job_id or str(uuid.uuid4())
+    t_start = time.time()
+    pipeline = get_model("pipeline")
+    automasker = get_model("automasker")
+    settings = get_model("settings")
 
-    person_image = Image.open(io.BytesIO(person_image_bytes)).convert("RGB")
-    clothing_image = Image.open(io.BytesIO(clothing_image_bytes)).convert("RGB")
+    # Map our garment categories to CatVTON's
+    category_map = {
+        "upper": "upper",
+        "lower": "lower",
+        "full": "overall",
+        "overall": "overall",
+    }
+    mask_type = category_map.get(garment_category, "upper")
 
-    person_image = resize_to_square(person_image, settings.output_size)
-    clothing_image = resize_to_square(clothing_image, settings.output_size)
+    # ── Stage 1: Load and preprocess images ────────────────────
+    logger.info("[%s] Stage 1/3 – Preprocessing", job_id)
+    person_img = Image.open(io.BytesIO(person_image_bytes)).convert("RGB")
+    cloth_img = Image.open(io.BytesIO(clothing_image_bytes)).convert("RGB")
 
-    # 1. Segmentation
-    logger.info("[%s] Step 1/5 – Segmentation", job_id)
-    seg = segment_person(person_image)
+    # Import CatVTON utilities (already on sys.path from loader)
+    from utils import resize_and_crop, resize_and_padding
 
-    # Expand mask based on garment category
-    if garment_category == "full":
-        from app.pipeline.segmentation import CLOTHING_LABELS
-        # Include lower-body labels for dresses/full outfits
-        extra_labels = {5, 6, 7}  # skirt, pants, dress
-        base_mask = seg.clothing_mask
-    else:
-        base_mask = seg.clothing_mask
+    target_size = (settings.output_width, settings.output_height)
+    person_resized = resize_and_crop(person_img, target_size)
+    cloth_resized = resize_and_padding(cloth_img, target_size)
 
-    dilated_mask = dilate_mask(base_mask, kernel_size=20)
+    # ── Stage 2: Generate agnostic mask via AutoMasker ─────────
+    logger.info("[%s] Stage 2/3 – AutoMasker (DensePose + SCHP)", job_id)
+    mask_result = automasker(person_resized, mask_type=mask_type)
+    mask = mask_result["mask"]
 
-    # 2. Pose
-    logger.info("[%s] Step 2/5 – Pose extraction", job_id)
-    pose = extract_pose(person_image)
-
-    # 3. Warp
-    logger.info("[%s] Step 3/5 – Clothing warp", job_id)
-    warp = warp_clothing(
-        clothing_image=clothing_image,
-        person_clothing_mask=dilated_mask,
-        target_size=(settings.output_size, settings.output_size),
+    # Blur the mask edges for smoother results
+    mask_processor = VaeImageProcessor(
+        vae_scale_factor=8,
+        do_normalize=False,
+        do_binarize=True,
+        do_convert_grayscale=True,
     )
+    mask = mask_processor.blur(mask, blur_factor=9)
 
-    # 4. Inpaint (face hard-protected via mask exclusion + IP-Adapter FaceID)
-    logger.info("[%s] Step 4/5 – Inpainting", job_id)
-    generated = run_inpainting(
-        person_image=person_image,
-        warped_clothing=warp.warped_clothing,
-        clothing_mask=dilated_mask,
-        pose_image=pose.pose_image,
-        seg_face_bbox=seg.face_bbox,
+    # ── Stage 3: CatVTON Diffusion ─────────────────────────────
+    logger.info("[%s] Stage 3/3 – CatVTON diffusion (%d steps, CFG %.1f)",
+                job_id, settings.num_inference_steps, settings.guidance_scale)
+
+    generator = torch.Generator(device="cuda").manual_seed(settings.seed)
+
+    result_images = pipeline(
+        image=person_resized,
+        condition_image=cloth_resized,
+        mask=mask,
+        num_inference_steps=settings.num_inference_steps,
+        guidance_scale=settings.guidance_scale,
+        height=settings.output_height,
+        width=settings.output_width,
+        generator=generator,
     )
+    result_image = result_images[0]
 
-    # 5. Blend
-    logger.info("[%s] Step 5/5 – Blending", job_id)
-    final_image = blend_result(
-        original_person=person_image,
-        generated_image=generated,
-        clothing_mask=seg.clothing_mask,
-        face_bbox=seg.face_bbox,
-        face_padding=settings.face_mask_padding,
-    )
-    free_gpu_memory()
+    elapsed = time.time() - t_start
+    logger.info("[%s] Pipeline complete in %.1fs", job_id, elapsed)
 
-    # Upload / encode result
-    result: dict = {"job_id": job_id}
-    if s3.is_configured():
-        key = s3.upload_image(final_image, key=f"results/{job_id}.png")
-        result["result_url"] = s3.get_presigned_url(key)
-        result["s3_key"] = key
-    else:
-        result["result_b64"] = encode_image_base64(final_image)
+    # ── Return result ──────────────────────────────────────────
+    from app.utils.image import encode_image_base64
+    result_b64 = encode_image_base64(result_image, fmt="PNG")
 
-    logger.info("[%s] ✅ Pipeline complete", job_id)
-    return result
+    return {
+        "job_id": job_id,
+        "result_image_base64": result_b64,
+        "garment_category": garment_category,
+        "resolution": f"{settings.output_width}x{settings.output_height}",
+        "inference_time_seconds": round(elapsed, 1),
+    }

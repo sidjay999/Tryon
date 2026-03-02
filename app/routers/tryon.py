@@ -55,5 +55,10 @@ async def submit_tryon(
             **{k: v for k, v in result.items() if k != "job_id"},
         })
     except Exception as exc:
-        logger.error("Pipeline error for job %s: %s", job_id, exc)
+        import traceback
+        logger.error(
+            "Pipeline error for job %s:\n%s",
+            job_id,
+            traceback.format_exc(),
+        )
         raise HTTPException(status_code=500, detail={"error": str(exc), "job_id": job_id})
