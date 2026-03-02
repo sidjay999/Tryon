@@ -1,5 +1,5 @@
 /**
- * Main app – Phase 2 (synchronous API).
+ * Main app – CatVTON Pipeline (synchronous API).
  * Result comes back in a single POST response — no polling.
  */
 import { submitTryOn } from "./api.js";
@@ -26,7 +26,6 @@ let clothingFile = null;
 let resultDataUrl = null;
 let sliderInstance = null;
 let personPreviewUrl = null;
-let stepCounter = 0;
 
 // ── Uploaders ─────────────────────────────────────────────────
 const personUploader = initUploader({
@@ -49,35 +48,42 @@ function updateBtn() {
     submitNote.textContent = ready ? "Both images loaded — ready to generate!" : "Upload both images to generate";
 }
 
+// ── Get selected garment category ─────────────────────────────
+function getGarmentCategory() {
+    const radio = document.querySelector('input[name="garment_category"]:checked');
+    return radio ? radio.value : "upper";
+}
+
 // ── Generate ──────────────────────────────────────────────────
 async function generate() {
     setUIState("loading");
     showProgress();
-    stepCounter = 0;
 
-    // Map step labels from api.js to progress values
+    // Map step labels to progress values (3-stage CatVTON pipeline)
     const STEP_PROGRESS = {
-        "Segmenting body…": { step: "segmentation", progress: 15 },
-        "Extracting pose…": { step: "pose", progress: 30 },
-        "Warping clothing…": { step: "warp", progress: 48 },
-        "Generating with SDXL…": { step: "inpainting", progress: 65 },
-        "Blending & finishing…": { step: "blend", progress: 88 },
+        "Parsing body with DensePose + SCHP…": { step: "parsing", progress: 20 },
+        "Running CatVTON diffusion…": { step: "generating", progress: 55 },
+        "Finishing up…": { step: "finishing", progress: 90 },
     };
 
     try {
         const result = await submitTryOn(
             personFile,
             clothingFile,
-            "upper",                    // garment_category — expandable later
+            getGarmentCategory(),
             (label) => {
                 const p = STEP_PROGRESS[label];
                 if (p) setProgress(p);
             },
         );
 
-        if (result.result_url) resultDataUrl = result.result_url;
-        else if (result.result_b64) resultDataUrl = `data:image/png;base64,${result.result_b64}`;
-        else throw new Error("No result image returned");
+        if (result.result_image_base64) {
+            resultDataUrl = `data:image/png;base64,${result.result_image_base64}`;
+        } else if (result.result_url) {
+            resultDataUrl = result.result_url;
+        } else {
+            throw new Error("No result image returned");
+        }
 
         showResult(resultDataUrl);
     } catch (err) {

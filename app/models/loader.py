@@ -39,21 +39,25 @@ def load_all_models():
     logger.info("Downloading CatVTON checkpoint (first run only)...")
     repo_path = snapshot_download(
         repo_id=settings.catvton_repo_id,
-        cache_dir=settings.models_cache_dir,
     )
     logger.info("CatVTON checkpoint at: %s", repo_path)
     _models["repo_path"] = repo_path
 
     # ── 2. Find CatVTON source directory ───────────────────────
-    # CatVTON source is cloned alongside our project
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # loader.py is at app/models/loader.py → 3 levels up to project root
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     catvton_dir = settings.catvton_dir or os.path.join(project_root, "CatVTON")
     if not os.path.isdir(catvton_dir):
-        # Try alternative location
         catvton_dir = os.path.join(project_root, "catvton_lib")
     if not os.path.isdir(catvton_dir):
+        # setup_wsl.sh clones to ~/tryon/CatVTON
+        catvton_dir = os.path.expanduser("~/tryon/CatVTON")
+    if not os.path.isdir(catvton_dir):
         raise FileNotFoundError(
-            f"CatVTON source not found. Expected at {catvton_dir}. "
+            f"CatVTON source not found. Searched:\n"
+            f"  1. {os.path.join(project_root, 'CatVTON')}\n"
+            f"  2. {os.path.join(project_root, 'catvton_lib')}\n"
+            f"  3. {os.path.expanduser('~/tryon/CatVTON')}\n"
             "Clone it: git clone https://github.com/Zheng-Chong/CatVTON.git CatVTON"
         )
     logger.info("CatVTON source at: %s", catvton_dir)
@@ -95,7 +99,7 @@ def load_all_models():
     _models["dtype"] = weight_dtype
     _models["settings"] = settings
 
-    vram = torch.cuda.get_device_properties(0).total_mem / 1024**3 if torch.cuda.is_available() else 0
+    vram = torch.cuda.get_device_properties(0).total_memory / 1024**3 if torch.cuda.is_available() else 0
     logger.info("=== All models loaded | VRAM: %.1fGB | CatVTON | DensePose+SCHP ===", vram)
 
 

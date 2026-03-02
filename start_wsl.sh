@@ -13,13 +13,13 @@ echo "════════════════════════�
 echo "  CatVTON Virtual Try-On Server"
 echo "═══════════════════════════════════════════════════"
 
-# Activate venv
-if [ -d "venv" ]; then
-    source venv/bin/activate
-elif [ -d "$HOME/tryon/venv" ]; then
+# Activate venv (prefer Linux venv over Windows venv)
+if [ -d "$HOME/tryon/venv/bin" ]; then
     source "$HOME/tryon/venv/bin/activate"
+elif [ -d "venv/bin" ]; then
+    source venv/bin/activate
 else
-    echo "ERROR: No venv found. Run setup_wsl.sh first."
+    echo "ERROR: No Linux venv found. Run setup_wsl.sh first."
     exit 1
 fi
 
@@ -28,7 +28,7 @@ python3 -c "
 import torch
 if torch.cuda.is_available():
     gpu = torch.cuda.get_device_name(0)
-    vram = torch.cuda.get_device_properties(0).total_mem / 1024**3
+    vram = torch.cuda.get_device_properties(0).total_memory / 1024**3
     print(f'GPU: {gpu} ({vram:.1f}GB VRAM)')
 else:
     print('WARNING: No GPU detected')

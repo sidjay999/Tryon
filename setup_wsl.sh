@@ -13,7 +13,7 @@ echo "════════════════════════�
 # ── 1. System packages ────────────────────────────────────────
 echo "[1/7] Installing system packages..."
 sudo apt-get update -qq
-sudo apt-get install -y -qq python3.12-venv python3-pip git wget curl build-essential libgl1-mesa-glx libglib2.0-0
+sudo apt-get install -y -qq python3.12-venv python3-pip git wget curl build-essential libgl1 libglib2.0-0
 
 # ── 2. Project directory ──────────────────────────────────────
 PROJECT_DIR="$HOME/tryon"
@@ -79,7 +79,7 @@ print(f'PyTorch: {torch.__version__}')
 print(f'CUDA available: {torch.cuda.is_available()}')
 if torch.cuda.is_available():
     print(f'GPU: {torch.cuda.get_device_name(0)}')
-    print(f'VRAM: {torch.cuda.get_device_properties(0).total_mem / 1024**3:.1f}GB')
+    print(f'VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB')
 else:
     print('WARNING: CUDA not available! GPU inference will not work.')
 "

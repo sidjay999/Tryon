@@ -1,7 +1,6 @@
 /**
- * API client – Phase 2 (synchronous response).
- * The API now returns the result directly in the POST response.
- * No polling needed.
+ * API client – CatVTON Pipeline (synchronous response).
+ * The API returns the result directly in the POST response.
  */
 
 const API_BASE = "";  // empty = same origin
@@ -10,9 +9,9 @@ const API_BASE = "";  // empty = same origin
  * Submit a try-on job and wait for the result directly.
  * @param {File} personFile
  * @param {File} clothingFile
- * @param {string} garmentCategory - "upper" | "full" | "lower"
+ * @param {string} garmentCategory - "upper" | "lower" | "overall"
  * @param {(label: string) => void} onStep - called with step labels during wait
- * @returns {Promise<{result_url?: string, result_b64?: string, job_id: string}>}
+ * @returns {Promise<{result_image_base64?: string, job_id: string}>}
  */
 export async function submitTryOn(personFile, clothingFile, garmentCategory = "upper", onStep) {
     const form = new FormData();
@@ -22,18 +21,16 @@ export async function submitTryOn(personFile, clothingFile, garmentCategory = "u
 
     // Simulate step labels while the server is processing
     const steps = [
-        "Segmenting body…",
-        "Extracting pose…",
-        "Warping clothing…",
-        "Generating with SDXL…",
-        "Blending & finishing…",
+        "Parsing body with DensePose + SCHP…",
+        "Running CatVTON diffusion…",
+        "Finishing up…",
     ];
     let stepIdx = 0;
     const stepTimer = setInterval(() => {
         if (stepIdx < steps.length) {
             onStep?.(steps[stepIdx++]);
         }
-    }, 3000);
+    }, 8000);  // ~8s per step for 50-step diffusion
 
     try {
         const res = await fetch(`${API_BASE}/api/tryon`, {

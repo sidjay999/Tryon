@@ -1,11 +1,11 @@
 """
-Health check router.
+Health check router – CatVTON Pipeline.
 """
 import torch
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from app.models.loader import models_ready
+from app.models.loader import get_model
 
 router = APIRouter(tags=["Health"])
 
@@ -21,9 +21,14 @@ async def health():
             "total_memory_gb": round(torch.cuda.get_device_properties(0).total_memory / 1e9, 2),
         }
 
+    models_loaded = get_model("pipeline", optional=True) is not None
+    automasker_loaded = get_model("automasker", optional=True) is not None
+
     return JSONResponse({
         "status": "ok",
-        "models_loaded": models_ready(),
+        "pipeline": "CatVTON (ICLR 2025)",
+        "models_loaded": models_loaded,
+        "automasker_loaded": automasker_loaded,
         "cuda_available": torch.cuda.is_available(),
         "gpu": gpu_info,
     })

@@ -1,7 +1,7 @@
 """
-Try-On API router – Phase 2 (synchronous).
-POST /api/tryon       → runs pipeline in-process, returns result directly
-GET  /api/tryon/health → alias for health check
+Try-On API router – CatVTON Production Pipeline.
+POST /api/tryon       → runs CatVTON pipeline in-process, returns result
+GET  /api/tryon/health → alias health
 """
 import logging
 import uuid
@@ -17,19 +17,21 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/tryon", tags=["Try-On"])
 
 
-@router.post("", summary="Run virtual try-on (synchronous)")
+@router.post("", summary="Run virtual try-on (CatVTON)")
 async def submit_tryon(
     person_image: UploadFile = File(..., description="Full-body photo of the person"),
     clothing_image: UploadFile = File(..., description="Photo of the clothing item"),
-    garment_category: Literal["upper", "full", "lower"] = Form(
+    garment_category: Literal["upper", "lower", "overall"] = Form(
         default="upper",
-        description="upper = shirt/jacket | full = dress/saree | lower = jeans/trousers",
+        description="upper = shirt/jacket | overall = dress/saree | lower = jeans/trousers",
     ),
 ):
     """
-    Runs the full 5-stage try-on pipeline synchronously.
-    Returns the result image directly (base64 or S3 URL).
-    Expected response time: 10–20 seconds on GPU.
+    Runs the CatVTON virtual try-on pipeline:
+      1. AutoMasker – pixel-level human parsing (DensePose + SCHP)
+      2. CatVTON – diffusion-based garment transfer (1024×768)
+    Returns result image as base64 PNG.
+    Expected inference time: 30–60 seconds on GPU.
     """
     job_id = str(uuid.uuid4())
     try:

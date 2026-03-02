@@ -1,15 +1,20 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AI Virtual Try-On | See Yourself in Any Style</title>
-  <meta name="description" content="Upload your photo and a clothing item — our AI generates a photorealistic try-on in seconds. Powered by Stable Diffusion XL." />
+  <meta name="description"
+    content="Upload your photo and a clothing item — our AI generates a photorealistic try-on in seconds. Powered by CatVTON (ICLR 2025)." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600&display=swap"
+    rel="stylesheet" />
   <link rel="stylesheet" href="css/style.css" />
 </head>
+
 <body>
   <!-- ── BACKGROUND PARTICLES ── -->
   <div class="bg-particles" id="bg-particles"></div>
@@ -28,7 +33,7 @@
       </nav>
       <div class="header-badge">
         <span class="badge-dot"></span>
-        SDXL Powered
+        CatVTON Powered
       </div>
     </div>
   </header>
@@ -36,25 +41,25 @@
   <!-- ── HERO ── -->
   <section class="hero">
     <div class="container hero-inner">
-      <div class="hero-tag">⚡ AI-Powered • 1024px HD Output • &lt;15s Inference</div>
+      <div class="hero-tag">⚡ AI-Powered • 1024×768 HD Output • DensePose + SCHP Parsing</div>
       <h1 class="hero-title">
         See Yourself in<br />
         <span class="gradient-text">Any Outfit</span> Instantly
       </h1>
       <p class="hero-subtitle">
-        Upload your photo and a clothing item. Our AI warps, blends, and
-        generates a photorealistic try-on using Stable Diffusion XL + ControlNet.
+        Upload your photo and a clothing item. CatVTON uses pixel-level body
+        parsing and learned diffusion to generate photorealistic virtual try-ons.
       </p>
       <div class="hero-actions">
         <a href="#try-now" class="btn btn-primary">Try It Now →</a>
         <a href="/docs" class="btn btn-ghost" target="_blank">View API Docs</a>
       </div>
       <div class="hero-stats">
-        <div class="stat"><span class="stat-num">1024px</span><span class="stat-label">HD Output</span></div>
+        <div class="stat"><span class="stat-num">1024×768</span><span class="stat-label">HD Output</span></div>
         <div class="stat-divider"></div>
-        <div class="stat"><span class="stat-num">&lt;15s</span><span class="stat-label">Inference Time</span></div>
+        <div class="stat"><span class="stat-num">~60s</span><span class="stat-label">Inference Time</span></div>
         <div class="stat-divider"></div>
-        <div class="stat"><span class="stat-num">SDXL</span><span class="stat-label">Base Model</span></div>
+        <div class="stat"><span class="stat-num">CatVTON</span><span class="stat-label">ICLR 2025</span></div>
       </div>
     </div>
   </section>
@@ -77,22 +82,22 @@
         <div class="step-card">
           <div class="step-num">02</div>
           <div class="step-icon">🧍</div>
-          <h3>Segmentation</h3>
-          <p>AI parses your body, extracts pose keypoints, and identifies the clothing region.</p>
+          <h3>Body Parsing</h3>
+          <p>DensePose + SCHP (dual human parsers) segment your body at pixel level — no bounding boxes.</p>
         </div>
         <div class="step-connector"></div>
         <div class="step-card">
           <div class="step-num">03</div>
           <div class="step-icon">✨</div>
-          <h3>SDXL Generate</h3>
-          <p>Stable Diffusion XL + ControlNet generates a photorealistic try-on result.</p>
+          <h3>CatVTON Diffusion</h3>
+          <p>CatVTON fuses the garment via latent concatenation — learned alignment, no warping artifacts.</p>
         </div>
         <div class="step-connector"></div>
         <div class="step-card">
           <div class="step-num">04</div>
           <div class="step-icon">🖼️</div>
-          <h3>HD Output</h3>
-          <p>Face identity is preserved, lighting is matched, and you get a 1024px result.</p>
+          <h3>1024×768 Output</h3>
+          <p>Face, hands, and body are naturally preserved. One-pass generation, no blending hacks.</p>
         </div>
       </div>
     </div>
@@ -141,6 +146,25 @@
           </div>
         </div>
 
+        <!-- Garment Category -->
+        <div class="category-row" id="category-row">
+          <label class="category-label">Garment Type:</label>
+          <div class="category-options">
+            <label class="category-option">
+              <input type="radio" name="garment_category" value="upper" checked />
+              <span>👕 Upper</span>
+            </label>
+            <label class="category-option">
+              <input type="radio" name="garment_category" value="lower" />
+              <span>👖 Lower</span>
+            </label>
+            <label class="category-option">
+              <input type="radio" name="garment_category" value="overall" />
+              <span>👗 Full Body</span>
+            </label>
+          </div>
+        </div>
+
         <!-- Submit Button -->
         <div class="submit-row">
           <button class="btn btn-primary btn-large" id="btn-generate" disabled>
@@ -153,31 +177,23 @@
         <!-- Progress -->
         <div class="progress-section hidden" id="progress-section">
           <div class="progress-steps" id="progress-steps">
-            <div class="progress-step" data-step="segmentation">
-              <div class="ps-icon">🧩</div>
-              <div class="ps-label">Segmentation</div>
-            </div>
-            <div class="progress-step" data-step="pose">
+            <div class="progress-step" data-step="parsing">
               <div class="ps-icon">🧍</div>
-              <div class="ps-label">Pose</div>
+              <div class="ps-label">Body Parsing</div>
             </div>
-            <div class="progress-step" data-step="warp">
-              <div class="ps-icon">📐</div>
-              <div class="ps-label">Warp</div>
-            </div>
-            <div class="progress-step" data-step="inpainting">
-              <div class="ps-icon">🎨</div>
-              <div class="ps-label">Generate</div>
-            </div>
-            <div class="progress-step" data-step="blend">
+            <div class="progress-step" data-step="generating">
               <div class="ps-icon">✨</div>
-              <div class="ps-label">Blend</div>
+              <div class="ps-label">CatVTON Diffusion</div>
+            </div>
+            <div class="progress-step" data-step="finishing">
+              <div class="ps-icon">🖼️</div>
+              <div class="ps-label">Finishing</div>
             </div>
           </div>
           <div class="progress-bar-wrap">
             <div class="progress-bar" id="progress-bar"></div>
           </div>
-          <div class="progress-label" id="progress-label">Initializing pipeline…</div>
+          <div class="progress-label" id="progress-label">Initializing CatVTON pipeline…</div>
         </div>
 
         <!-- Result -->
@@ -220,11 +236,12 @@
       <div class="footer-logo">
         <span class="logo-icon">✦</span> TryOnAI
       </div>
-      <p class="footer-copy">Powered by Stable Diffusion XL · ControlNet · FastAPI</p>
+      <p class="footer-copy">Powered by CatVTON (ICLR 2025) · DensePose · SCHP · FastAPI</p>
       <a href="/docs" class="footer-link" target="_blank">API Docs</a>
     </div>
   </footer>
 
   <script type="module" src="js/app.js"></script>
 </body>
+
 </html>
