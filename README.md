@@ -1,174 +1,91 @@
-# 🧥 AI Virtual Try-On (Phase 2)
+# TryOnAI — Virtual Try-On (CatVTON)
 
-> Production-grade SaaS virtual try-on platform powered by **SDXL + IP-Adapter FaceID + SDXL Refiner**.
-> Preserves user identity and facial realism. Generates 1024px photorealistic results in under 20 seconds.
+Production-grade AI virtual try-on powered by **CatVTON** (ICLR 2025).  
+Upload a person photo + a garment → get a photorealistic 1024×768 result.
 
----
+## Features
 
-## ✨ What's New in Phase 2
+- **CatVTON diffusion** — learned garment transfer via latent concatenation
+- **DensePose + SCHP** — pixel-level human parsing (no bounding box hacks)
+- **1024×768 HD output** — single-pass generation, no blending artifacts
+- **Garment types** — upper / lower / full-body
+- **FastAPI backend** — REST API + web UI with before/after slider
+- **6GB VRAM** — runs on RTX 4050 Laptop GPU via FP16
 
-| Upgrade | Effect |
-|---|---|
-| **Hard face mask exclusion** | Diffusion never touches the face region — zero identity drift |
-| **InsightFace ArcFace** | Precise face bounding box + embedding extraction |
-| **IP-Adapter FaceID Plus** | Conditions entire generation on face identity embeddings |
-| **SDXL Refiner pass** | Sharpens fabric/texture detail at 0.2 strength without altering identity |
-| **Synchronous API** | No Redis/Celery needed — single POST returns result directly |
-| **Simplified Docker** | 2 services (api + nginx) instead of 4 |
-| **Multi-garment support** | `garment_category` param: `upper` / `full` / `lower` |
+## Requirements
 
----
+- **WSL2 (Ubuntu)** with NVIDIA GPU driver
+- Python 3.12 + PyTorch + CUDA
+- ~5GB disk for model weights (downloaded automatically on first run)
 
-## 🏗 Architecture
-
-```
-Person Photo + Clothing Image
-       │
-       ├─→ Segformer B2 Clothes: clothing mask + face bbox
-       ├─→ OpenPose: body keypoints (ControlNet conditioning)
-       └─→ InsightFace: ArcFace face embedding
-              │
-              ↓
-         Mask = clothing_mask MINUS face_region (hard exclusion)
-              │
-              ↓
-         IP-Adapter FaceID Plus
-         (conditions SDXL on face identity embedding)
-              │
-              ↓
-         SDXL Inpainting (only touches clothing region)
-              │
-              ↓
-         SDXL Refiner (strength=0.2 — texture detail only)
-              │
-              ↓
-         Blend: Poisson clone + Gaussian face paste + histogram match
-              │
-              ↓
-         1024px output — face identical to input photo
-```
-
----
-
-## 📁 Project Structure
-
-```
-tryon/
-├── app/
-│   ├── main.py             # FastAPI entry point + model preload
-│   ├── config.py           # All settings (env-driven, Pydantic)
-│   ├── models/loader.py    # SDXL + InsightFace + IP-Adapter + Refiner
-│   ├── pipeline/
-│   │   ├── segmentation.py # Segformer + face bbox + mask exclusion
-│   │   ├── pose.py         # OpenPose keypoints
-│   │   ├── warping.py      # Affine + TPS clothing warp
-│   │   ├── inpainting.py   # SDXL + IP-Adapter FaceID + Refiner
-│   │   └── blending.py     # Poisson + Gaussian face paste + histogram
-│   ├── queue/tasks.py      # Synchronous pipeline orchestrator
-│   ├── routers/tryon.py    # POST /api/tryon (synchronous)
-│   └── storage/s3.py       # S3 adapter (optional)
-├── frontend/               # Vanilla HTML/CSS/JS SPA
-├── nginx/nginx.conf        # Reverse proxy
-├── Dockerfile
-├── docker-compose.yml      # 2 services: api + nginx
-├── .env.example
-├── requirements.txt
-├── SETUP_GUIDE.md          # Full beginner setup guide
-└── README.md
-```
-
----
-
-## 🚀 Quick Start
-
-### Prerequisites
-- Docker + Docker Compose v2
-- NVIDIA GPU ≥ 18GB VRAM (24GB recommended)
-- NVIDIA Container Toolkit installed (see `SETUP_GUIDE.md`)
-
-### 1. Clone and configure
-```bash
-git clone https://github.com/sidjay999/Tryon.git tryon
-cd tryon
-cp .env.example .env
-```
-
-### 2. Launch
-```bash
-docker compose up --build
-```
-
-> ⏳ **First run:** Downloads ~17GB of model weights (SDXL + Refiner + Segformer + IP-Adapter).
-> Takes 30–50 minutes. Cached in Docker volume for all subsequent starts (~90s).
-
-### 3. Open the app
-```
-http://localhost           # UI
-http://localhost/docs      # API Swagger docs
-http://localhost/health    # GPU + model status
-```
-
----
-
-## ⚙️ Configuration Reference
-
-| Variable | Default | Description |
-|---|---|---|
-| `DEVICE` | `cuda` | `cuda` or `cpu` |
-| `USE_FP16` | `true` | FP16 to halve VRAM |
-| `USE_XFORMERS` | `true` | xFormers attention |
-| `NUM_INFERENCE_STEPS` | `30` | Quality/speed tradeoff |
-| `OUTPUT_SIZE` | `1024` | Output resolution |
-| `USE_REFINER` | `true` | SDXL Refiner pass |
-| `REFINER_STRENGTH` | `0.2` | 0.15–0.3 recommended |
-| `FACE_MASK_PADDING` | `30` | Face exclusion padding in px |
-| `IP_ADAPTER_SCALE` | `0.7` | FaceID identity lock strength |
-| `FACE_IDENTITY_ENABLED` | `true` | Disable if InsightFace unavailable |
-
----
-
-## 🧪 API
+## Quick Start
 
 ```bash
-# Upload and get result in one call
-curl -X POST http://localhost/api/tryon \
+# 1. Open WSL
+wsl -d Ubuntu
+cd /mnt/c/Users/JAY/OneDrive/Desktop/tryon
+
+# 2. First-time setup (installs everything)
+bash setup_wsl.sh
+
+# 3. Start the server
+bash start_wsl.sh
+```
+
+Open `http://localhost:8000` in your Windows browser.
+
+## Project Structure
+
+```
+app/
+├── config.py           # CatVTON settings (resolution, steps, precision)
+├── main.py             # FastAPI app with model preloading
+├── models/
+│   └── loader.py       # Loads CatVTON pipeline + AutoMasker
+├── queue/
+│   └── tasks.py        # 3-stage pipeline orchestration
+├── routers/
+│   ├── health.py       # GET /health
+│   └── tryon.py        # POST /api/tryon
+├── storage/
+│   └── s3.py           # Optional S3 upload
+└── utils/
+    └── image.py        # Image preprocessing
+frontend/
+├── index.html          # Web UI
+├── css/style.css       # Dark glassmorphism theme
+└── js/                 # Upload, progress, slider modules
+setup_wsl.sh            # WSL environment setup
+start_wsl.sh            # Server launcher
+```
+
+## Pipeline
+
+```
+Person Image + Garment Image
+        ↓
+  AutoMasker (DensePose + SCHP)
+        ↓ agnostic mask
+  CatVTON Diffusion (50 steps, CFG 2.5)
+        ↓
+  1024×768 Result
+```
+
+## API
+
+```bash
+# Try-on
+curl -X POST http://localhost:8000/api/tryon \
   -F person_image=@person.jpg \
-  -F clothing_image=@shirt.jpg \
+  -F clothing_image=@garment.jpg \
   -F garment_category=upper
 
-# Garment categories:
-# upper  → t-shirts, shirts, jackets (recommended for best quality)
-# full   → dresses, sarees, full outfits
-# lower  → jeans, trousers (experimental)
+# Health check
+curl http://localhost:8000/health
 ```
 
----
+Interactive docs at `http://localhost:8000/docs`.
 
-## 🔧 Production Scaling (When Ready)
+## License
 
-To re-enable Celery + Redis for concurrent inference:
-1. Uncomment the `redis` and `worker` sections in `docker-compose.yml`
-2. Set `REDIS_URL=redis://redis:6379/0` in `.env`
-3. Switch `routers/tryon.py` back to async enqueue pattern
-
----
-
-## 📊 Performance
-
-| GPU | Inference Time | VRAM |
-|---|---|---|
-| A10G (24GB) | ~13–18s | ~17GB |
-| A100 (40GB) | ~8–12s | ~17GB |
-| RTX 4090 (24GB) | ~10–15s | ~17GB |
-| RTX 3090 (24GB) | ~15–20s | ~17GB (tight — disable refiner if OOM) |
-
----
-
-## 📖 Docs
-
-| Doc | Description |
-|---|---|
-| [SETUP_GUIDE.md](SETUP_GUIDE.md) | Full beginner GPU/Docker setup guide |
-| [docs/architecture.md](docs/architecture.md) | System diagrams |
-| [docs/api.md](docs/api.md) | API reference |
-| [docs/model_optimization.md](docs/model_optimization.md) | FP16, xFormers, batching notes |
+CatVTON model: see [Zheng-Chong/CatVTON](https://github.com/Zheng-Chong/CatVTON).
