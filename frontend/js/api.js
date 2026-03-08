@@ -1,6 +1,6 @@
 /**
- * API client – CatVTON Pipeline (synchronous response).
- * The API returns the result directly in the POST response.
+ * API client – CatVTON Pipeline Phase 2 (synchronous response).
+ * 4-stage pipeline with preprocessing.
  */
 
 const API_BASE = "";  // empty = same origin
@@ -11,7 +11,7 @@ const API_BASE = "";  // empty = same origin
  * @param {File} clothingFile
  * @param {string} garmentCategory - "upper" | "lower" | "overall"
  * @param {(label: string) => void} onStep - called with step labels during wait
- * @returns {Promise<{result_image_base64?: string, job_id: string}>}
+ * @returns {Promise<object>}
  */
 export async function submitTryOn(personFile, clothingFile, garmentCategory = "upper", onStep) {
     const form = new FormData();
@@ -19,18 +19,19 @@ export async function submitTryOn(personFile, clothingFile, garmentCategory = "u
     form.append("clothing_image", clothingFile);
     form.append("garment_category", garmentCategory);
 
-    // Simulate step labels while the server is processing
+    // Simulate step labels while the server is processing (4-stage pipeline)
     const steps = [
+        "Detecting person & cropping…",
+        "Removing garment background…",
         "Parsing body with DensePose + SCHP…",
         "Running CatVTON diffusion…",
-        "Finishing up…",
     ];
     let stepIdx = 0;
     const stepTimer = setInterval(() => {
         if (stepIdx < steps.length) {
             onStep?.(steps[stepIdx++]);
         }
-    }, 8000);  // ~8s per step for 50-step diffusion
+    }, 6000);  // ~6s per step
 
     try {
         const res = await fetch(`${API_BASE}/api/tryon`, {
@@ -43,7 +44,11 @@ export async function submitTryOn(personFile, clothingFile, garmentCategory = "u
         if (!res.ok) {
             const err = await res.json().catch(() => ({}));
             const detail = err.detail;
-            if (typeof detail === "object") throw new Error(detail.error || "Server error");
+            if (typeof detail === "object") {
+                // Structured error from Phase 2
+                const msg = detail.message || detail.error || "Server error";
+                throw new Error(msg);
+            }
             throw new Error(detail || `Server error ${res.status}`);
         }
 

@@ -1,18 +1,31 @@
 """
-Pipeline orchestration – CatVTON Production Pipeline.
-3-stage pipeline: AutoMasker → CatVTON Diffusion → Output
+Pipeline orchestration – CatVTON Production Pipeline (Phase 2 slim).
+Pipeline: Preprocess → AutoMasker → CatVTON Diffusion → Output
+No extra GPU models loaded — preprocessing is CPU only.
 """
 import io
 import logging
 import time
 
+import numpy as np
 import torch
 from diffusers.image_processor import VaeImageProcessor
 from PIL import Image
 
 from app.models.loader import get_model
+from app.monitoring.monitor import PipelineMonitor
+from app.preprocessing.person_preprocess import preprocess_person
+from app.preprocessing.garment_preprocess import preprocess_garment
 
 logger = logging.getLogger(__name__)
+
+
+class PipelineError(Exception):
+    """Structured pipeline error with code."""
+    def __init__(self, code: str, message: str):
+        self.code = code
+        self.message = message
+        super().__init__(message)
 
 
 def run_tryon_pipeline_sync(
@@ -24,20 +37,16 @@ def run_tryon_pipeline_sync(
     """
     Run the full CatVTON virtual try-on pipeline synchronously.
 
-    Args:
-        person_image_bytes: Raw bytes of person image
-        clothing_image_bytes: Raw bytes of garment image
-        job_id: Unique job identifier
-        garment_category: "upper" | "lower" | "overall"
-    Returns:
-        dict with result_image (base64) and metadata
+    Pipeline (all preprocessing is CPU, only AutoMasker + CatVTON use GPU):
+      1. Person image: EXIF fix → center crop → resize to 768×1024  [CPU]
+      2. Garment image: bg removal (rembg) → crop → center → resize  [CPU]
+      3. AutoMasker: DensePose + SCHP → agnostic mask  [GPU]
+      4. CatVTON diffusion → result image  [GPU]
     """
-    t_start = time.time()
     pipeline = get_model("pipeline")
     automasker = get_model("automasker")
     settings = get_model("settings")
 
-    # Map our garment categories to CatVTON's
     category_map = {
         "upper": "upper",
         "lower": "lower",
@@ -46,54 +55,91 @@ def run_tryon_pipeline_sync(
     }
     mask_type = category_map.get(garment_category, "upper")
 
-    # ── Stage 1: Load and preprocess images ────────────────────
-    logger.info("[%s] Stage 1/3 – Preprocessing", job_id)
-    person_img = Image.open(io.BytesIO(person_image_bytes)).convert("RGB")
-    cloth_img = Image.open(io.BytesIO(clothing_image_bytes)).convert("RGB")
+    with PipelineMonitor(request_id=job_id) as monitor:
 
-    # Import CatVTON utilities (already on sys.path from loader)
-    from utils import resize_and_crop, resize_and_padding
+        # ── Stage 1: Person preprocessing (CPU) ────────────────
+        logger.info("[%s] Stage 1/4 – Person preprocessing", job_id)
+        try:
+            person_img = Image.open(io.BytesIO(person_image_bytes)).convert("RGB")
+        except Exception:
+            raise PipelineError("INVALID_IMAGE", "Could not read person image.")
 
-    target_size = (settings.output_width, settings.output_height)
-    person_resized = resize_and_crop(person_img, target_size)
-    cloth_resized = resize_and_padding(cloth_img, target_size)
+        person_result = preprocess_person(person_img)
+        person_preprocessed = person_result["image"]
 
-    # ── Stage 2: Generate agnostic mask via AutoMasker ─────────
-    logger.info("[%s] Stage 2/3 – AutoMasker (DensePose + SCHP)", job_id)
-    mask_result = automasker(person_resized, mask_type=mask_type)
-    mask = mask_result["mask"]
+        # ── Stage 2: Garment preprocessing (CPU) ───────────────
+        logger.info("[%s] Stage 2/4 – Garment preprocessing", job_id)
+        try:
+            cloth_img = Image.open(io.BytesIO(clothing_image_bytes)).convert("RGB")
+        except Exception:
+            raise PipelineError("INVALID_IMAGE", "Could not read garment image.")
 
-    # Blur the mask edges for smoother results
-    mask_processor = VaeImageProcessor(
-        vae_scale_factor=8,
-        do_normalize=False,
-        do_binarize=True,
-        do_convert_grayscale=True,
-    )
-    mask = mask_processor.blur(mask, blur_factor=9)
+        garment_result = preprocess_garment(
+            cloth_img,
+            enable_bg_removal=settings.enable_bg_removal,
+        )
+        cloth_preprocessed = garment_result["image"]
 
-    # ── Stage 3: CatVTON Diffusion ─────────────────────────────
-    logger.info("[%s] Stage 3/3 – CatVTON diffusion (%d steps, CFG %.1f)",
-                job_id, settings.num_inference_steps, settings.guidance_scale)
+        logger.info(
+            "[%s] Preprocessed: person %s→768×1024, garment bg_removed=%s",
+            job_id, person_result["original_size"], garment_result["bg_removed"],
+        )
 
-    generator = torch.Generator(device="cuda").manual_seed(settings.seed)
+        # ── Stage 3: AutoMasker (GPU – already loaded) ─────────
+        logger.info("[%s] Stage 3/4 – AutoMasker (DensePose + SCHP)", job_id)
+        mask_result = automasker(person_preprocessed, mask_type=mask_type)
+        mask = mask_result["mask"]
 
-    result_images = pipeline(
-        image=person_resized,
-        condition_image=cloth_resized,
-        mask=mask,
-        num_inference_steps=settings.num_inference_steps,
-        guidance_scale=settings.guidance_scale,
-        height=settings.output_height,
-        width=settings.output_width,
-        generator=generator,
-    )
-    result_image = result_images[0]
+        # Validate: if mask is essentially empty, person wasn't detected
+        mask_arr = np.array(mask.convert("L"))
+        mask_coverage = (mask_arr > 128).sum() / mask_arr.size
+        if mask_coverage < 0.01:
+            raise PipelineError(
+                "PERSON_NOT_DETECTED",
+                "AutoMasker could not detect a person in the image. "
+                "Please upload a clear, full-body photo.",
+            )
 
-    elapsed = time.time() - t_start
-    logger.info("[%s] Pipeline complete in %.1fs", job_id, elapsed)
+        logger.info("[%s] Mask coverage: %.1f%%", job_id, mask_coverage * 100)
 
-    # ── Return result ──────────────────────────────────────────
+        # Blur mask edges for smoother transitions
+        mask_processor = VaeImageProcessor(
+            vae_scale_factor=8,
+            do_normalize=False,
+            do_binarize=True,
+            do_convert_grayscale=True,
+        )
+        mask = mask_processor.blur(mask, blur_factor=9)
+
+        # ── Stage 4: CatVTON Diffusion (GPU – already loaded) ─
+        logger.info(
+            "[%s] Stage 4/4 – CatVTON diffusion (%d steps, CFG %.1f)",
+            job_id, settings.num_inference_steps, settings.guidance_scale,
+        )
+
+        generator = torch.Generator(device="cuda").manual_seed(settings.seed)
+
+        try:
+            result_images = pipeline(
+                image=person_preprocessed,
+                condition_image=cloth_preprocessed,
+                mask=mask,
+                num_inference_steps=settings.num_inference_steps,
+                guidance_scale=settings.guidance_scale,
+                height=settings.output_height,
+                width=settings.output_width,
+                generator=generator,
+            )
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            raise PipelineError(
+                "GPU_OOM",
+                "GPU ran out of memory. Try closing other apps or restart WSL.",
+            )
+
+        result_image = result_images[0]
+
+    # ── Build response ─────────────────────────────────────────
     from app.utils.image import encode_image_base64
     result_b64 = encode_image_base64(result_image, fmt="PNG")
 
@@ -102,5 +148,13 @@ def run_tryon_pipeline_sync(
         "result_image_base64": result_b64,
         "garment_category": garment_category,
         "resolution": f"{settings.output_width}x{settings.output_height}",
-        "inference_time_seconds": round(elapsed, 1),
+        "monitoring": {
+            "gpu": monitor.metrics.get("gpu", ""),
+            "vram_peak_gb": monitor.metrics.get("vram_peak_gb", 0),
+            "inference_time_s": monitor.metrics.get("inference_time_s", 0),
+        },
+        "preprocessing": {
+            "bg_removed": garment_result["bg_removed"],
+            "mask_coverage_pct": round(mask_coverage * 100, 1),
+        },
     }

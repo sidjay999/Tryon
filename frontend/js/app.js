@@ -26,6 +26,8 @@ let clothingFile = null;
 let resultDataUrl = null;
 let sliderInstance = null;
 let personPreviewUrl = null;
+let lastMonitoring = null;
+let lastPreprocessing = null;
 
 // ── Uploaders ─────────────────────────────────────────────────
 const personUploader = initUploader({
@@ -59,11 +61,12 @@ async function generate() {
     setUIState("loading");
     showProgress();
 
-    // Map step labels to progress values (3-stage CatVTON pipeline)
+    // Map step labels to progress values (4-stage Phase 2 pipeline)
     const STEP_PROGRESS = {
-        "Parsing body with DensePose + SCHP…": { step: "parsing", progress: 20 },
-        "Running CatVTON diffusion…": { step: "generating", progress: 55 },
-        "Finishing up…": { step: "finishing", progress: 90 },
+        "Detecting person & cropping…": { step: "preprocessing", progress: 10 },
+        "Removing garment background…": { step: "preprocessing", progress: 25 },
+        "Parsing body with DensePose + SCHP…": { step: "parsing", progress: 45 },
+        "Running CatVTON diffusion…": { step: "generating", progress: 65 },
     };
 
     try {
@@ -84,6 +87,10 @@ async function generate() {
         } else {
             throw new Error("No result image returned");
         }
+
+        // Store monitoring data for display
+        lastMonitoring = result.monitoring || null;
+        lastPreprocessing = result.preprocessing || null;
 
         showResult(resultDataUrl);
     } catch (err) {

@@ -18,6 +18,9 @@ huggingface_hub
 hf_transfer
 matplotlib
 
+# ── Phase 2: Preprocessing ───────────────────────────────────
+rembg
+
 # ── DensePose / Detectron2 deps ───────────────────────────────
 fvcore
 cloudpickle

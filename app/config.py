@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     output_height: int = 1024
     output_width: int = 768
 
+    # ── Phase 2: Preprocessing ────────────────────────────────
+    enable_bg_removal: bool = True       # rembg garment bg removal (CPU)
+    enable_face_restoration: bool = False # CodeFormer (disabled — no VRAM)
+
     # ── Paths ─────────────────────────────────────────────────
     catvton_dir: str = ""  # Auto-detected
     models_cache_dir: str = os.path.expanduser("~/tryon_models")
